@@ -19,7 +19,7 @@ import os
 import logging
 from datetime import datetime, timezone
 from functools import wraps
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 
 # google-auth validoi IAP JWT-assertion kryptografisesti Googlen julkisia avaimia vasten.
 # Tämä on pakollinen askel tuotannossa: ilman tätä verkkokerrokseen ennen Cloud Runia
