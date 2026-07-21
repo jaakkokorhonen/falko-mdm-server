@@ -228,3 +228,30 @@ Mene kohtaan **System Settings -> Privacy & Security -> Profiles** ja suorita as
 - **TLS pakollinen** — Apple MDM vaatii HTTPS:n. Cloud Run tarjoaa tämän automaattisesti.
 - **Julkinen pääsy** — Cloud Run -palvelun täytyy olla julkinen (`--allow-unauthenticated`), jotta laitteet voivat ottaa yhteyttä `/checkin` ja `/mdm` reitteihin. Admin-rajapinnat (`/admin/*`) on suojattu kooditasolla Google IAP JWT-assertion tarkistuksella.
 - **Firestore-indeksit** — `commands`-kokoelman `status + created_at` -compositeindeksi tarvitaan jos laitteilla on paljon komentoja jonossa. Luo Firestore-konsolissa.
+
+---
+
+## CI/CD & DevSecOps -testausputki
+
+Järjestelmässä on käytössä kaksivaiheinen build- ja tietoturvatestausputki:
+
+### 1. Kooditason testaus (GitHub Actions)
+Jokaisesta commitista ja Pull Requestistä main-haaraan ajetaan automaattinen laadun- ja tietoturvanvarmistus:
+*   **Yksikkötestit (`pytest`)**: Ajaa `tests/test_routes.py` -tiedoston testit mockatulla tietokannalla. Voit ajaa ne myös paikallisesti: `./scripts/run_tests.sh`.
+*   **Secret Scanning (`gitleaks`)**: Estää salaisten avainten tai salasanojen pushaamisen koodiin.
+*   **SAST (`bandit`)**: Skannaa Python-koodin haavoittuvuuksien varalta.
+*   **SCA (`pip-audit`)**: Tarkastaa, ettei asennetuissa Python-kirjastoissa ole tunnettuja haavoittuvuuksia (CVE).
+*   **IaC-skannaus (`checkov`)**: Varmistaa, että Terraform-tiedostot noudattavat tietoturvasuosituksia.
+
+### 2. Julkaisu pilveen (Google Cloud Build)
+Kun koodi yhdistetään `main`-haaraan, GCP Cloud Build hoitaa automaattisen julkaisun:
+1.  **Kääntäminen:** Kääntää Docker-kuvan ja pushaa sen Artifact Registryyn.
+2.  **Kontin skannaus:** GCP:n **Artifact Analysis** skannaa uuden kontin tietoturvahaavoittuvuudet heti pushauksen jälkeen.
+3.  **Infrastruktuuri:** Ajaa Terraform-koodin (`terraform apply`) päivittäen palvelimet ja muutokset pilvessä.
+
+#### Cloud Build -muuttujat (Substitutions)
+Määritä Cloud Build Triggerissä seuraavat käyttäjän määrittämät muuttujat salaisuuksien välittämiseksi Terraformille:
+*   `_APNS_TEAM_ID` (Apple Developer Team ID)
+*   `_APNS_KEY_ID` (APNs Key ID)
+*   `_SECRET_KEY` (Flask session secret key)
+

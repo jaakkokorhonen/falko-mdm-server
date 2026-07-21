@@ -1,9 +1,5 @@
-# Cloud Build -pipeline: rakentaa Docker-imagen ja deployaa Cloud Runiin
-# Triggeröi automaattisesti kun push main-haaraan
-#
-# Vaatimukset GCP:ssä:
-#   gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
-#   gcloud artifacts repositories create falko --repository-format=docker --location=europe-north1
+# GCP Cloud Build -pipeline: rakentaa Docker-imagen ja ajaa Terraform-julkaisun
+# Triggeröityy automaattisesti kun muutokset yhdistetään main-haaraan
 
 steps:
   # 1. Rakennetaan Docker-image
@@ -11,37 +7,37 @@ steps:
     args:
       - build
       - '-t'
-      - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:$COMMIT_SHA'
-      - '-t'
       - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:latest'
       - '.'
 
-  # 2. Pushataan Artifact Registryyn
+  # 2. Tallennetaan kuva Artifact Registryyn (Artifact Analysis skannaa tämän automaattisesti)
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - push
-      - '--all-tags'
-      - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server'
+      - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:latest'
 
-  # 3. Deployataan Cloud Runiin
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
+  # 3. Alustetaan Terraform
+  - name: 'hashicorp/terraform:1.8.0'
+    dir: 'terraform'
     args:
-      - run
-      - deploy
-      - falko-mdm-server
-      - '--image=europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:$COMMIT_SHA'
-      - '--region=europe-north1'
-      - '--platform=managed'
-      - '--allow-unauthenticated'
-      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID'
-      - '--min-instances=0'
-      - '--max-instances=10'
-      - '--memory=512Mi'
-      - '--cpu=1'
+      - 'init'
+
+  # 4. Ajetaan Terraform julkaisemaan kaikki pilviresurssit
+  - name: 'hashicorp/terraform:1.8.0'
+    dir: 'terraform'
+    args:
+      - 'apply'
+      - '-auto-approve'
+      - '-var=gcp_project_id=$PROJECT_ID'
+      - '-var=gcp_region=europe-north1'
+      - '-var=dns_project_id=froide'
+      - '-var=dns_zone_name=falko-fi-zone'
+      - '-var=apns_team_id=$_APNS_TEAM_ID'
+      - '-var=apns_key_id=$_APNS_KEY_ID'
+      - '-var=secret_key=$_SECRET_KEY'
+      - '-var=container_image=europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:latest'
 
 images:
-  - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:$COMMIT_SHA'
   - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:latest'
 
 options:
