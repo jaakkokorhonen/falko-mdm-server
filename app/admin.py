@@ -6,8 +6,7 @@ Endpointit:
   POST /admin/devices/<udid>/command — lisää komento laitteen jonoon
   POST /admin/devices/<udid>/push   — lähetä APNs herätys
 
-Autentikaatio: Bearer-token ympäristömuuttujasta ADMIN_TOKEN.
-Ja/tai rajoita Cloud Runin IAM-käytännöillä.
+Autentikaatio: Google Identity-Aware Proxy (IAP) -otsake X-Goog-Authenticated-User-Email.
 """
 import os
 import logging
@@ -21,22 +20,25 @@ admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 logger = logging.getLogger(__name__)
 
 
-def require_token(f):
-    """Decorator: tarkistaa Authorization: Bearer <ADMIN_TOKEN> -otsakkeen."""
+def require_iap(f):
+    """Decorator: varmistaa Google IAP -otsakkeen ja falko.fi-sähköpostiosoitteen."""
     @wraps(f)
     def decorated(*args, **kwargs):
-        admin_token = os.environ.get("ADMIN_TOKEN", "")
-        if not admin_token:
-            return jsonify({"error": "ADMIN_TOKEN ei asetettu"}), 500
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or auth[7:] != admin_token:
-            return jsonify({"error": "Unauthorized"}), 401
+        user_header = request.headers.get("X-Goog-Authenticated-User-Email", "")
+        # Muoto: "accounts.google.com:jaakko@falko.fi"
+        if not user_header or not user_header.startswith("accounts.google.com:"):
+            return jsonify({"error": "IAP-autentikointi puuttuu tai on virheellinen"}), 401
+        
+        email = user_header.split("accounts.google.com:")[1]
+        if not email.endswith("@falko.fi"):
+            return jsonify({"error": "Käyttöoikeus evätty (vain falko.fi-käyttäjille)"}), 403
+            
         return f(*args, **kwargs)
     return decorated
 
 
 @admin_bp.get("/devices")
-@require_token
+@require_iap
 def list_all_devices():
     """Listaa kaikki rekisteröidyt laitteet."""
     devices = list_devices()
@@ -44,7 +46,7 @@ def list_all_devices():
 
 
 @admin_bp.get("/devices/<udid>")
-@require_token
+@require_iap
 def get_one_device(udid: str):
     """Palauttaa yksittäisen laitteen tiedot."""
     device = get_device(udid)
@@ -54,7 +56,7 @@ def get_one_device(udid: str):
 
 
 @admin_bp.post("/devices/<udid>/command")
-@require_token
+@require_iap
 def send_command(udid: str):
     """Lisää MDM-komennon laitteen jonoon.
 
@@ -96,7 +98,7 @@ def send_command(udid: str):
 
 
 @admin_bp.post("/devices/<udid>/push")
-@require_token
+@require_iap
 def trigger_push(udid: str):
     """Lähettää APNs herätyksen laitteelle jotta se pollaa MDM-serveriä."""
     device = get_device(udid)
@@ -104,14 +106,16 @@ def trigger_push(udid: str):
         return jsonify({"error": "Laitetta ei löydy"}), 404
 
     push_token = device.get("push_token")
+    push_magic = device.get("push_magic")
     topic = device.get("topic")
-    if not push_token or not topic:
-        return jsonify({"error": "Laitteella ei ole push tokenia tai topicia"}), 400
+    if not push_token or not push_magic or not topic:
+        return jsonify({"error": "Laitteella ei ole riittäviä APNs-tietoja (push_token, push_magic, topic)"}), 400
 
     sandbox = os.environ.get("APNS_SANDBOX", "false").lower() == "true"
-    ok = send_push(push_token, topic, sandbox=sandbox)
+    ok = send_push(push_token, push_magic, topic, sandbox=sandbox)
 
     if ok:
         return jsonify({"status": "push sent"}), 200
     else:
         return jsonify({"error": "APNs push epäonnistui"}), 502
+

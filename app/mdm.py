@@ -18,7 +18,7 @@ mdm_bp = Blueprint("mdm", __name__)
 logger = logging.getLogger(__name__)
 
 
-def _build_command_plist(command_type: str, payload: dict | None = None) -> bytes:
+def _build_command_plist(command_type: str, cmd_uuid: str, payload: dict | None = None) -> bytes:
     """Rakentaa MDM-komentovastausplistin."""
     cmd: dict = {
         "RequestType": command_type,
@@ -27,7 +27,7 @@ def _build_command_plist(command_type: str, payload: dict | None = None) -> byte
         cmd.update(payload)
     return plist_dumps({
         "Command": cmd,
-        "CommandUUID": str(uuid.uuid4()),
+        "CommandUUID": cmd_uuid,
     }, fmt=FMT_XML)
 
 
@@ -53,9 +53,7 @@ def mdm():
 
     # Kuitataan edellinen komento jos status on tiedossa
     if cmd_uuid and status in ("Acknowledged", "Error", "CommandFormatError", "NotNow"):
-        # Haetaan komennon doc-id Firestoresta status-päivitystä varten
-        # (yksinkertaistettu: merkitään status suoraan)
-        pass  # ack_command vaatii cmd_id:n — laajennetaan tarvittaessa
+        ack_command(udid, cmd_uuid, status.lower())
 
     # Haetaan seuraava komento jonosta
     cmd_id, cmd = dequeue_command(udid)
@@ -68,5 +66,6 @@ def mdm():
     command_type = cmd.get("command_type", "DeviceInformation")
     payload = cmd.get("payload", {})
 
-    response_plist = _build_command_plist(command_type, payload)
+    response_plist = _build_command_plist(command_type, cmd_id, payload)
     return Response(response_plist, status=200, mimetype="application/xml")
+

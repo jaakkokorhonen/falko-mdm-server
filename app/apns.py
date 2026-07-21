@@ -38,11 +38,12 @@ def _get_apns_token() -> str:
     return token
 
 
-def send_push(push_token: str, topic: str, sandbox: bool = False) -> bool:
+def send_push(push_token: str, push_magic: str, topic: str, sandbox: bool = False) -> bool:
     """Lähettää MDM push-herätyksen laitteelle.
 
     Args:
         push_token: Laitteen APNs push token (hex-string)
+        push_magic: Laitteen push magic string (lähetetty TokenUpdatessa)
         topic: APNs topic (esim. com.apple.mgmt.External.XXXX)
         sandbox: True = käytä sandbox-ympäristöä (kehitys)
 
@@ -59,8 +60,8 @@ def send_push(push_token: str, topic: str, sandbox: bool = False) -> bool:
             "apns-push-type": "mdm",
             "apns-topic": topic,
         }
-        # MDM push payload on aina tämä
-        body = {"mdm": push_token}
+        # MDM push payload on aina muotoa {"mdm": "<PushMagic>"}
+        body = {"mdm": push_magic}
 
         resp = requests.post(url, json=body, headers=headers, timeout=10)
 
@@ -74,3 +75,4 @@ def send_push(push_token: str, topic: str, sandbox: bool = False) -> bool:
     except Exception as exc:
         logger.exception("APNs push poikkeus: %s", exc)
         return False
+
