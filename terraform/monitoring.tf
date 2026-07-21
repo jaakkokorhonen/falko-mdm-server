@@ -34,23 +34,11 @@ resource "google_logging_metric" "iap_failures" {
   }
 }
 
-# 4. Hälytysryhmä (Notification Channel) sähköpostille
-# Huom: Voit määrittää tämän vastaanottamaan ilmoitukset sähköpostiisi
-resource "google_monitoring_notification_channel" "email_admin" {
-  project      = var.gcp_project_id
-  display_name = "MDM Admin Email Channel"
-  type         = "email"
-  labels = {
-    email_address = "jaakko.korhonen@gmail.com"
-  }
-}
-
-# 5. Hälytyssääntö: APNs-sertifikaatin vanhenemisvaroitus havaittu lokissa
+# 4. Hälytyssääntö: APNs-sertifikaatin vanhenemisvaroitus havaittu lokissa
 resource "google_monitoring_alert_policy" "apns_expiry_alert" {
   project      = var.gcp_project_id
   display_name = "MDM APNs Certificate Expiration Warning"
   combiner     = "OR"
-  notification_channels = [google_monitoring_notification_channel.email_admin.name]
 
   conditions {
     display_name = "APNs Expiry Log Count"
@@ -70,12 +58,11 @@ resource "google_monitoring_alert_policy" "apns_expiry_alert" {
   }
 }
 
-# 6. Hälytyssääntö: Palvelin heittää toistuvasti virheitä (yli 5 virhettä minuutissa)
+# 5. Hälytyssääntö: Palvelin heittää toistuvasti virheitä (yli 5 virhettä minuutissa)
 resource "google_monitoring_alert_policy" "server_error_alert" {
   project      = var.gcp_project_id
   display_name = "MDM Server High Error Rate Alert"
   combiner     = "OR"
-  notification_channels = [google_monitoring_notification_channel.email_admin.name]
 
   conditions {
     display_name = "High Error Rate"
@@ -95,12 +82,11 @@ resource "google_monitoring_alert_policy" "server_error_alert" {
   }
 }
 
-# 7. Hälytyssääntö: Epäonnistuneita IAP-kirjautumisyrityksiä havaittu lokissa
+# 6. Hälytyssääntö: Epäonnistuneita IAP-kirjautumisyrityksiä havaittu lokissa
 resource "google_monitoring_alert_policy" "iap_failure_alert" {
   project      = var.gcp_project_id
   display_name = "MDM IAP Bypass or Auth Failure Alert"
   combiner     = "OR"
-  notification_channels = [google_monitoring_notification_channel.email_admin.name]
 
   conditions {
     display_name = "IAP Auth Failure Count"
