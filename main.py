@@ -12,7 +12,7 @@ Parannus (2026-07): middleware (security headers, rate limiting) rekisteröity.
 """
 import os
 import logging
-from flask import Flask
+from flask_cors import CORS
 from app.mdm import mdm_bp
 from app.checkin import checkin_bp
 from app.admin import admin_bp
@@ -35,6 +35,11 @@ def create_app() -> Flask:
         Konfiguroitu Flask-instanssi.
     """
     app = Flask(__name__)
+    CORS(
+        app,
+        resources={r"/admin/*": {"origins": ["https://mdm.falko.fi", "https://falko-mdm.web.app"]}},
+        supports_credentials=True
+    )
     # SECRET_KEY vaaditaan Flaskin sessioille. MDM-protokolla ei käytä sessioita,
     # mutta Flask vaatii arvon — tuotannossa aseta vahva satunnainen arvo:
     #   openssl rand -base64 32 | gcloud secrets create falko-secret-key --data-file=-
