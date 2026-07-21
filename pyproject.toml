@@ -1,0 +1,28 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "smoke: nopeat savutestit — ajetaan jokaisessa PR:ssä",
+    "regression: laajempi regressiosarja — ajetaan main-mergessä ja yöajossa",
+    "slow: raskaat integraatiotestit — ajetaan vain yöajossa",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+omit = [
+    "tests/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 70
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"
