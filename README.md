@@ -175,10 +175,56 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 
 ---
 
+## Julkaisu (Deploy)
+
+Voit julkaista palvelimen ja luoda tarvittavan GCP-infrastruktuurin manuaalisesti:
+
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+### Avaimet ja ympäristömuuttujat
+Skripti tarkistaa Secret Managerin ja kysyy tarvittaessa polun paikalliseen APNs-avaintiedostoon (`.p8`), jonka se lataa turvallisesti pilveen. Se kysyy myös Apple **Team ID** ja **Key ID** -tunnukset ja asettaa ne Cloud Runin ympäristömuuttujiksi sekä generoi satunnaisen Flask `SECRET_KEY`-avaimen.
+
+---
+
+## Verkkotunnuksen vahvistus (mdm-api.falko.fi)
+
+Google Cloud Run vaatii, että vahvistat domainisi (`falko.fi`) omistajuuden Google Search Consolessa ennen kuin domain-mäppäys voidaan ottaa käyttöön:
+
+1. Aja komento `gcloud domains verify falko.fi` avataksesi Search Consolen selaimeen.
+2. Lisää tarvittaessa Search Consolen antama `google-site-verification` -tietue (TXT) domainisi DNS-vyöhykkeelle (`falko-fi-zone` `froide`-projektissa).
+3. Kun omistajuus on vahvistettu, skripti pystyy luomaan mäppäyksen.
+4. Lisää CNAME-tietue: `mdm-api.falko.fi` -> `ghs.googlehosted.com.` DNS-hallinnassasi.
+
+---
+
+## macOS MDM Onboarding & Apple Push (APNs)
+
+macOS-laitteiden MDM-rekisteröinti vaatii **laiteprofiilin** (`FalkoMDMEnrollment.mobileconfig`), joka löytyy [falko-device-onboarding](https://github.com/jaakkokorhonen/falko-device-onboarding) -repositoriosta.
+
+### 1. MDM Vendor -oikeuksien hakeminen (Apple)
+Apple vaatii MDM-palvelimelta push-tunnuksen (Topic). Tämän saamiseksi sinun tulee olla osa Applen MDM Vendor -ohjelmaa:
+1. Lähetä pyyntö osoitteessa: **[developer.apple.com/contact](https://developer.apple.com/contact)** (Valitse *Certificates, Identifiers, and Provisioning Profiles*).
+2. Pyydä oikeutta luoda **MDM CSR Signing Certificate** (MDM Vendor program). Hyväksyntä kestää yleensä muutaman arkipäivän.
+
+### 2. MDM Push -sertifikaatin luonti
+1. Kun oikeudet on myönnetty, luo varmennepyyntö Keychainilla (Mac) ja luo Developer-portaalissa **MDM CSR Signing Certificate**.
+2. Allekirjoita varmennepyyntö ja lataa se Applen Push-portaaliin: **[identity.apple.com/pushcert](https://identity.apple.com/pushcert)**.
+3. Lataa valmis push-sertifikaatti, lue sen `Topic`-tunnus (UID-kenttä, esim. `com.apple.mgmt.External.xxxxxx`) ja sijoita se `FalkoMDMEnrollment.mobileconfig` -tiedoston `<key>Topic</key>`-kenttään.
+
+### 3. Profiilin asennus laitteeseen
+Avaa profiili laitteellasi:
+```bash
+open FalkoMDMEnrollment.mobileconfig
+```
+Mene kohtaan **System Settings -> Privacy & Security -> Profiles** ja suorita asennus loppuun ylläpitäjän tunnuksilla.
+
+---
+
 ## Huomioita tuotantokäyttöön
 
 - **TLS pakollinen** — Apple MDM vaatii HTTPS:n. Cloud Run tarjoaa tämän automaattisesti.
-- **IAP ennen tuotantoon vientiä** — aktivoi IAP ja poista `--allow-unauthenticated` deploy-komennosta kun admin-UI on käytössä.
-- **Profiilin allekirjoitus** — `FalkoMDMEnrollment.mobileconfig` täytyy allekirjoittaa koodisertifikaatilla ennen jakelua (macOS 13+). Käytä `openssl smime` tai Appleʼn `profiles` -työkalua.
-- **MDM-sertifikaatti** — Tämä serveri käyttää JWT-autentikaatiota (token-based MDM). Jos haluat sertifikaattipohjaisen MDM:n, lisää TLS-asiakasvarmennuksen käsittely `/checkin`-endpointiin.
+- **Julkinen pääsy** — Cloud Run -palvelun täytyy olla julkinen (`--allow-unauthenticated`), jotta laitteet voivat ottaa yhteyttä `/checkin` ja `/mdm` reitteihin. Admin-rajapinnat (`/admin/*`) on suojattu kooditasolla Google IAP JWT-assertion tarkistuksella.
 - **Firestore-indeksit** — `commands`-kokoelman `status + created_at` -compositeindeksi tarvitaan jos laitteilla on paljon komentoja jonossa. Luo Firestore-konsolissa.
