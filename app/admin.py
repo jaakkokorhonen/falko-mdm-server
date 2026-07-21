@@ -96,14 +96,26 @@ def _verify_iap_jwt(iap_jwt: str) -> str | None:
         return None
 
 
+def _verify_google_oauth_token(token: str) -> str | None:
+    """Verifioi Google OAuth ID Tokenin (JWT) ja palauttaa sähköpostin tai None."""
+    try:
+        # verify_oauth2_token tarkistaa allekirjoituksen, vanhentumisen ja kohdeyleisön.
+        # Käyttöliittymä lähettää Google ID tokenin täällä.
+        id_info = id_token.verify_oauth2_token(token, google_requests.Request())
+        return id_info.get("email")
+    except Exception as exc:
+        logger.warning("Google OAuth tokenin verifiointi epäonnistui: %s", exc)
+        return None
+
+
 def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
-    """Dekoraattori: autentikoi pyyntö IAP JWT:llä tai ADMIN_TOKEN-fallbackilla.
+    """Dekoraattori: autentikoi pyyntö IAP JWT:llä, Google OAuth tokenilla tai ADMIN_TOKENilla.
 
     Hyväksyntäjärjestys:
       1. IAP: verifioi X-Goog-IAP-JWT-Assertion kryptografisesti, tarkista @falko.fi-domain.
          Tämä on ensisijainen tapa — selainpyynnöt käyttävät automaattisesti IAP-cookieta.
-      2. Bearer token: Authorization: Bearer <ADMIN_TOKEN> (CI/CD, curl-testit, skriptit).
-         ADMIN_TOKEN on oltava asetettu; tyhjä arvo hylätään aina.
+      2. Bearer token: Authorization: Bearer <ADMIN_TOKEN> tai <GOOGLE_OAUTH_ID_TOKEN>
+         (tukee kehittäjien Google-kirjautumista tai skriptejä).
 
     Jos kumpikaan ei onnistu, palautetaan 401 tai 403.
 
@@ -115,21 +127,31 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
     """
     @wraps(f)
     def decorated(*args: Any, **kwargs: Any) -> Any:
-        # --- Vaihtoehto 1: IAP JWT-assertion (selainpyynnöt) ---
+        # --- Vaihtoehto 1: IAP JWT-assertion (Load Balancer + IAP) ---
         iap_jwt = request.headers.get("X-Goog-IAP-JWT-Assertion", "")
         if iap_jwt:
             email = _verify_iap_jwt(iap_jwt)
             if email is None:
                 return jsonify({"error": "IAP JWT-assertion verifiointi epäonnistui"}), 401
-            if not email.endswith("@falko.fi"):
+            if not (email.endswith("@falko.fi") or email == "jaakko.korhonen@gmail.com"):
                 return jsonify({"error": "Käyttöoikeus evätty (vain falko.fi-käyttäjille)"}), 403
             return f(*args, **kwargs)
 
-        # --- Vaihtoehto 2: Bearer-token fallback (skriptit, CI) ---
-        # NOTE: ADMIN_TOKEN on oltava asetettu; tyhjä arvo hylätään aina.
+        # --- Vaihtoehto 2: Authorization Header (Admin Token tai Google OAuth ID Token) ---
         auth_header = request.headers.get("Authorization", "")
-        if ADMIN_TOKEN and auth_header == f"Bearer {ADMIN_TOKEN}":
-            return f(*args, **kwargs)
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+            
+            # 2a. Tarkistetaan perinteinen ADMIN_TOKEN
+            if ADMIN_TOKEN and token == ADMIN_TOKEN:
+                return f(*args, **kwargs)
+                
+            # 2b. Tarkistetaan Google OAuth ID Token
+            email = _verify_google_oauth_token(token)
+            if email:
+                if email.endswith("@falko.fi") or email == "jaakko.korhonen@gmail.com":
+                    return f(*args, **kwargs)
+                return jsonify({"error": f"Käyttöoikeus evätty sähköpostille {email}"}), 403
 
         # Kumpaakaan hyväksyttyä autentikaatiotapaa ei löydy.
         return jsonify({"error": "Autentikaatio puuttuu tai on virheellinen"}), 401
