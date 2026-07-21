@@ -47,7 +47,7 @@ jobs:
       # 6. Riippuvuuksien haavoittuvuusskannaus (pip-audit SCA)
       - name: Run pip-audit SCA Scan
         run: |
-          pip-audit --local
+          pip-audit -r requirements.txt
 
       # 7. Terraform-tiedostojen tietoturvaskannaus (Checkov IaC)
       - name: Run Checkov IaC Scan
