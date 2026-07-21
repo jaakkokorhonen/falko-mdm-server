@@ -79,18 +79,15 @@ def list_devices() -> list[dict]:
     return [{"udid": d.id, **d.to_dict()} for d in db.collection("devices").stream()]
 
 
-# --- Komantojono -------------------------------------------------------------
+# --- Komentojono -------------------------------------------------------------
+
 
 def enqueue_command(udid: str, command: dict) -> None:
-    """Lisää MDM-komennon laitteen jonoon.
-
-    Firestore generoi uniikin cmd_id:n automaattisesti (.add()).
-    Komento tallennetaan alakokoelmaan devices/{udid}/commands/.
+    """Lisää Apple MDM -komennon laitteen odottavien komentojen jonoon Firestoreen.
 
     Args:
-        udid:    Kohdeläite.
-        command: Komento-dict, jonka tulee sisältää vähintään
-                 'command_type', 'status' ("pending") ja 'created_at'.
+        udid: Laitteen uniikki UDID-tunniste.
+        command: Lisättävä komentosanakirja, joka sisältää command_type:n, tilan jne.
     """
     db = get_db()
     db.collection("devices").document(udid) \
@@ -98,20 +95,14 @@ def enqueue_command(udid: str, command: dict) -> None:
 
 
 def dequeue_command(udid: str) -> tuple[str, dict] | tuple[None, None]:
-    """Palauttaa seuraavan odottavan komennon FIFO-järjestyksessä.
-
-    Hakee vain yhden komennon kerrallaan (limit(1)) ja järjestää created_at
-    -kentän mukaan jotta vanhimmat komennot lähetetään ensin.
+    """Hakee ja palauttaa seuraavan odottavan komennon laitteen jonosta (FIFO).
 
     Args:
-        udid: Laite jonka jonosta haetaan.
+        udid: Laitteen uniikki UDID-tunniste.
 
     Returns:
-        Tuple (cmd_id, command_dict) jos jono ei ole tyhjä,
-        muuten (None, None).
-
-    TODO(jaakko): Lisää Firestore-transaktio estämään race condition
-    tilanteessa jossa useampi Cloud Run -instanssi ajaa samanaikaisesti.
+        Kaksikko (tuple), jossa on komennon dokumentti-ID ja komennon tiedot dictinä,
+        tai (None, None) jos odottavia komentoja ei ole.
     """
     db = get_db()
     docs = (
@@ -128,19 +119,15 @@ def dequeue_command(udid: str) -> tuple[str, dict] | tuple[None, None]:
 
 
 def ack_command(udid: str, cmd_id: str, status: str = "acknowledged") -> None:
-    """Päivittää komennon tilan.
-
-    Kutsutaan kahdessa tilanteessa:
-      1. Kun komento lähetetään laitteelle → status = "sent"
-      2. Kun laite raportoi tuloksen → status = "acknowledged" | "error" |
-         "commandformaterror" | "notnow"
+    """Päivittää laitteelle lähetetyn komennon tilan Firestoreen.
 
     Args:
-        udid:   Laite.
-        cmd_id: Komennon Firestore-dokumentti-ID.
-        status: Uusi tila. Oletus "acknowledged".
+        udid: Laitteen uniikki UDID-tunniste.
+        cmd_id: Päivitettävän komennon dokumentti-ID.
+        status: Komennon uusi tila (esim. 'sent', 'acknowledged', 'error').
     """
     db = get_db()
     db.collection("devices").document(udid) \
       .collection("commands").document(cmd_id) \
       .update({"status": status})
+

@@ -78,7 +78,9 @@ def _verify_iap_jwt(iap_jwt: str) -> str | None:
         return None
 
 
-def require_auth(f):
+from typing import Callable, Any
+
+def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
     """Dekoraattori: autentikoi pyyntö IAP JWT:llä tai ADMIN_TOKEN-fallbackilla.
 
     Hyväksyntäjärjestys:
@@ -86,9 +88,15 @@ def require_auth(f):
       2. Bearer token: Authorization: Bearer <ADMIN_TOKEN> (skriptikäyttö)
 
     Jos kumpikaan ei onnistu, palautetaan 401 tai 403.
+
+    Args:
+        f: Suojattava reittifunktio.
+
+    Returns:
+        Suojattu reittifunktio.
     """
     @wraps(f)
-    def decorated(*args, **kwargs):
+    def decorated(*args: Any, **kwargs: Any) -> Any:
         # --- Vaihtoehto 1: IAP JWT-assertion (selainpyynnöt) ---
         iap_jwt = request.headers.get("X-Goog-IAP-JWT-Assertion", "")
         if iap_jwt:
@@ -113,11 +121,11 @@ def require_auth(f):
 
 @admin_bp.get("/devices")
 @require_auth
-def list_all_devices():
+def list_all_devices() -> Response:
     """Listaa kaikki rekisteröidyt laitteet.
 
     Returns:
-        JSON { devices: [...], count: int }
+        Response: Flask JSON-vastaus ja 200 OK.
     """
     devices = list_devices()
     return jsonify({"devices": devices, "count": len(devices)})
@@ -125,15 +133,16 @@ def list_all_devices():
 
 @admin_bp.get("/devices/<udid>")
 @require_auth
-def get_one_device(udid: str):
+def get_one_device(udid: str) -> Response:
     """Palauttaa yksittäisen laitteen tiedot.
 
     Args:
         udid: Laitteen Apple-tunniste URL-polusta.
 
     Returns:
-        JSON-laitetietue tai 404 jos laitetta ei löydy.
+        Response: JSON-laitetietue ja 200 OK tai virhe ja 404.
     """
+
     device = get_device(udid)
     if not device:
         return jsonify({"error": "Laitetta ei löydy"}), 404
@@ -142,7 +151,7 @@ def get_one_device(udid: str):
 
 @admin_bp.post("/devices/<udid>/command")
 @require_auth
-def send_command(udid: str):
+def send_command(udid: str) -> Response:
     """Lisää MDM-komennon laitteen jonoon.
 
     Laite hakee komennon seuraavalla MDM-pollilla tai APNs-herätyksen
@@ -165,10 +174,12 @@ def send_command(udid: str):
       EnableRemoteDesktop  — etätyöpöytä päälle
       DisableRemoteDesktop — etätyöpöytä pois
 
+    Args:
+        udid: Laitteen Apple-tunniste URL-polusta.
+
     Returns:
-        202 Accepted { status: "queued", command_type } jos onnistui.
-        400 Bad Request jos command_type puuttuu.
-        404 jos laitetta ei löydy.
+        Response: 202 Accepted { status: "queued", command_type } jos onnistui,
+        tai virhe ja 400/404.
     """
     body = request.get_json(silent=True) or {}
     command_type = body.get("command_type")
@@ -194,7 +205,7 @@ def send_command(udid: str):
 
 @admin_bp.post("/devices/<udid>/push")
 @require_auth
-def trigger_push(udid: str):
+def trigger_push(udid: str) -> Response:
     """Lähettää APNs-herätyksen laitteelle.
 
     Herätys ei sisällä komentoa — se vain käskee laitteen
@@ -206,10 +217,8 @@ def trigger_push(udid: str):
         udid: Laite jolle herätys lähetetään.
 
     Returns:
-        200 { status: "push sent" } jos APNs hyväksyi pyynnön.
-        400 jos laitteen APNs-tiedot puuttuvat.
-        404 jos laitetta ei löydy.
-        502 jos APNs hylkäsi pyynnön.
+        Response: 200 { status: "push sent" } jos APNs hyväksyi pyynnön,
+        tai virhe ja 400/404/502.
     """
     device = get_device(udid)
     if not device:
@@ -230,3 +239,4 @@ def trigger_push(udid: str):
     if ok:
         return jsonify({"status": "push sent"}), 200
     return jsonify({"error": "APNs push epäonnistui"}), 502
+

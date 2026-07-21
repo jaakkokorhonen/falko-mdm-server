@@ -62,8 +62,9 @@ def _build_command_plist(command_type: str, cmd_uuid: str, payload: dict | None 
 
 
 @mdm_bp.route("/mdm", methods=["PUT"])
-def mdm():
+def mdm() -> Response:
     """Käsittelee laitteen MDM-pollin tai APNs-herätykseen vastauksen.
+
 
     Protokollan kulku:
       1. Laite lähettää PUT /mdm (tyhjä Status ensimmäisellä kerralla)

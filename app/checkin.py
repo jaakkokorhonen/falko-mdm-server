@@ -32,8 +32,9 @@ _UDID_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{18,38}[A-Z0-9]$")
 
 
 @checkin_bp.post("/checkin")
-def checkin():
+def checkin() -> tuple[str, int] | tuple[Response, int]:
     """Käsittelee Apple MDM Check-In -pyyntön.
+
 
     Apple lähettää pyyntön XML-plistinä (Content-Type: application/x-apple-aspen-mdm-checkin).
     Endpoint palauttaa aina HTTP 200 onnistuneelle viestille — Apple odottaa tätä.
