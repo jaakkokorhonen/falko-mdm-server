@@ -6,39 +6,113 @@ Endpointit:
   POST /admin/devices/<udid>/command — lisää komento laitteen jonoon
   POST /admin/devices/<udid>/push   — lähetä APNs herätys
 
-Autentikaatio: Google Identity-Aware Proxy (IAP) -otsake X-Goog-Authenticated-User-Email.
+Autentikaatio: Google Identity-Aware Proxy (IAP).
+  - Selain: IAP-cookie + X-Goog-Authenticated-User-Email + X-Goog-IAP-JWT-Assertion
+  - Skriptit: Authorization: Bearer <ADMIN_TOKEN> (env-muuttuja ADMIN_TOKEN)
+
+Security note: Pelkkä header-tarkistus ei riitä — JWT-assertion verifioidaan
+kryptografisesti Googlen julkisilla avaimilla (google-auth). Muutoin hyökkääjä
+voi spoofattaa X-Goog-Authenticated-User-Email -otsakkeen ohittaen IAP:n.
+Ref: https://cloud.google.com/iap/docs/signed-headers-howto
 """
 import os
 import logging
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Blueprint, request, jsonify
+
+# google-auth validoi IAP JWT-assertion kryptografisesti Googlen julkisia avaimia vasten.
+# Tämä on pakollinen askel tuotannossa: ilman tätä verkkokerrokseen ennen Cloud Runia
+# pääsevä hyökkääjä voi spoofattaa X-Goog-Authenticated-User-Email -otsakkeen.
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
+
 from .db import list_devices, get_device, enqueue_command
 from .apns import send_push
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 logger = logging.getLogger(__name__)
 
+# IAP JWT-assertion verifiointiin tarvitaan audience-arvo, joka on
+# muotoa /projects/<project_number>/apps/<project_id>.
+# Aseta Cloud Runin ympäristömuuttujaan IAP_AUDIENCE.
+# Löydät arvon: gcloud iap web describe --resource-type=backend-services
+IAP_AUDIENCE = os.environ.get("IAP_AUDIENCE", "")
 
-def require_iap(f):
-    """Decorator: varmistaa Google IAP -otsakkeen ja falko.fi-sähköpostiosoitteen."""
+# Fallback-token skriptikäyttöön (CI, curl-testit).
+# Jos ADMIN_TOKEN on asetettu, se hyväksytään IAP-tarkistuksen ohella.
+# NOTE: Aseta vahva (>= 32 merkkiä) satunnainen arvo, esim:
+#   openssl rand -base64 32 | gcloud secrets create falko-admin-token --data-file=-
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+
+
+def _verify_iap_jwt(iap_jwt: str) -> str | None:
+    """Verifioi Google IAP JWT-assertion ja palauttaa sähköpostin tai None.
+
+    Verifioi allekirjoituksen Googlen julkisilla avaimilla (ES256).
+    Palauttaa sähköpostin muodossa 'user@falko.fi',
+    tai None jos JWT on virheellinen tai vanhentunut.
+
+    Args:
+        iap_jwt: X-Goog-IAP-JWT-Assertion -otsakkeen arvo.
+
+    Returns:
+        Käyttäjän sähköpostiosoite tai None.
+    """
+    if not IAP_AUDIENCE:
+        # NOTE: IAP_AUDIENCE puuttuu — JWT-assertion verifiointia ei voida tehdä.
+        # Tuotannossa tämä on virheellinen tila; local-kehityksessä hyväksyttävä.
+        logger.warning("IAP_AUDIENCE ei ole asetettu — JWT-assertion verifiointia ei tehdä")
+        return None
+    try:
+        info = id_token.verify_token(
+            iap_jwt,
+            google_requests.Request(),
+            audience=IAP_AUDIENCE,
+            certs_url="https://www.gstatic.com/iap/verify/public_key",
+        )
+        # JWT:n email-kenttä on muotoa "user@falko.fi"
+        return info.get("email")
+    except Exception as exc:
+        logger.warning("IAP JWT-assertion verifiointi epäonnistui: %s", exc)
+        return None
+
+
+def require_auth(f):
+    """Decorator: autentikoi pyyntö IAP JWT:llä tai ADMIN_TOKEN-fallbackilla.
+
+    Hyväksyntäjärjestys:
+      1. IAP: verifioi X-Goog-IAP-JWT-Assertion kryptografisesti, tarkista @falko.fi-domain
+      2. Bearer token: Authorization: Bearer <ADMIN_TOKEN> (skriptikäyttö)
+
+    Jos kumpikaan ei onnistu, palautetaan 401 tai 403.
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
-        user_header = request.headers.get("X-Goog-Authenticated-User-Email", "")
-        # Muoto: "accounts.google.com:jaakko@falko.fi"
-        if not user_header or not user_header.startswith("accounts.google.com:"):
-            return jsonify({"error": "IAP-autentikointi puuttuu tai on virheellinen"}), 401
-        
-        email = user_header.split("accounts.google.com:")[1]
-        if not email.endswith("@falko.fi"):
-            return jsonify({"error": "Käyttöoikeus evätty (vain falko.fi-käyttäjille)"}), 403
-            
-        return f(*args, **kwargs)
+        # --- Vaihtoehto 1: IAP JWT-assertion (selainpyynnöt) ---
+        iap_jwt = request.headers.get("X-Goog-IAP-JWT-Assertion", "")
+        if iap_jwt:
+            email = _verify_iap_jwt(iap_jwt)
+            if email is None:
+                return jsonify({"error": "IAP JWT-assertion verifiointi epäonnistui"}), 401
+            if not email.endswith("@falko.fi"):
+                return jsonify({"error": "Käyttöoikeus evätty (vain falko.fi-käyttäjille)"}), 403
+            return f(*args, **kwargs)
+
+        # --- Vaihtoehto 2: Bearer-token fallback (skriptit, CI) ---
+        # NOTE: ADMIN_TOKEN on oltava asetettu; tyhjä arvo hylätään aina.
+        auth_header = request.headers.get("Authorization", "")
+        if ADMIN_TOKEN and auth_header == f"Bearer {ADMIN_TOKEN}":
+            return f(*args, **kwargs)
+
+        # Kumpaakaan hyväksyttyä autentikaatiotapaa ei löydy.
+        return jsonify({"error": "Autentikaatio puuttuu tai on virheellinen"}), 401
+
     return decorated
 
 
 @admin_bp.get("/devices")
-@require_iap
+@require_auth
 def list_all_devices():
     """Listaa kaikki rekisteröidyt laitteet."""
     devices = list_devices()
@@ -46,7 +120,7 @@ def list_all_devices():
 
 
 @admin_bp.get("/devices/<udid>")
-@require_iap
+@require_auth
 def get_one_device(udid: str):
     """Palauttaa yksittäisen laitteen tiedot."""
     device = get_device(udid)
@@ -56,7 +130,7 @@ def get_one_device(udid: str):
 
 
 @admin_bp.post("/devices/<udid>/command")
-@require_iap
+@require_auth
 def send_command(udid: str):
     """Lisää MDM-komennon laitteen jonoon.
 
@@ -98,7 +172,7 @@ def send_command(udid: str):
 
 
 @admin_bp.post("/devices/<udid>/push")
-@require_iap
+@require_auth
 def trigger_push(udid: str):
     """Lähettää APNs herätyksen laitteelle jotta se pollaa MDM-serveriä."""
     device = get_device(udid)
@@ -118,4 +192,3 @@ def trigger_push(udid: str):
         return jsonify({"status": "push sent"}), 200
     else:
         return jsonify({"error": "APNs push epäonnistui"}), 502
-
