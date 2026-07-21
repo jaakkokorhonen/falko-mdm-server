@@ -3,6 +3,7 @@
 Rakenne Firestoressä:
   devices/{udid}                    — laitetietue (malli, OS, tila, APNs-tiedot)
   devices/{udid}/commands/{cmd_id}  — MDM-komanto (status: pending | sent | acknowledged | error)
+  users/{email}                     — käyttäjätietue (status: pending | authorized | denied)
 
 Kaikki tietokantakutsut kulkevat tämän moduulin kautta —
 älä kutsu Firestorea suoraan muista moduuleista.
@@ -13,6 +14,7 @@ Parannus (2026-07): list_devices tukee sivutusta (page_size + cursor),
 """
 import os
 import logging
+from datetime import datetime, timezone
 from google.cloud import firestore
 
 logger = logging.getLogger(__name__)
@@ -164,3 +166,81 @@ def ack_command(udid: str, cmd_id: str, status: str = "acknowledged") -> None:
     db.collection("devices").document(udid) \
       .collection("commands").document(cmd_id) \
       .update({"status": status})
+
+
+# --- Käyttäjät (OIDC SSO luvitusjärjestelmä) -----------------------------------
+
+def get_user(email: str) -> dict | None:
+    """Hakee käyttäjätietueen sähköpostin perusteella.
+
+    Args:
+        email: Käyttäjän sähköpostiosoite (dokumentin ID).
+
+    Returns:
+        Käyttäjätietue dict tai None jos ei löydy.
+    """
+    db = get_db()
+    doc = db.collection("users").document(email).get()
+    if doc.exists:
+        return doc.to_dict()
+    return None
+
+
+def upsert_user(email: str, role: str = "user", status: str = "pending") -> dict:
+    """Luo tai päivittää käyttäjätietueen Firestoreen.
+
+    Jos käyttäjä on jo olemassa, päivitetään vain last_login ja
+    säilytetään olemassaoleva tila ja rooli.
+
+    Args:
+        email:  Käyttäjän sähköpostiosoite.
+        role:   Oletusrooli uudelle käyttäjälle ('user' tai 'admin').
+        status: Oletustila uudelle käyttäjälle ('pending', 'authorized', 'denied').
+
+    Returns:
+        Lopullinen käyttäjätietue.
+    """
+    db = get_db()
+    ref = db.collection("users").document(email)
+    now = datetime.now(timezone.utc).isoformat()
+    doc = ref.get()
+    if doc.exists:
+        ref.update({"last_login": now})
+        return ref.get().to_dict()
+    data = {
+        "email": email,
+        "status": status,
+        "role": role,
+        "created_at": now,
+        "last_login": now,
+    }
+    ref.set(data)
+    return data
+
+
+def list_users() -> list[dict]:
+    """Listaa kaikki käyttäjät, uusimmat ensin.
+
+    Returns:
+        Lista käyttäjätietueista.
+    """
+    db = get_db()
+    docs = db.collection("users").order_by(
+        "created_at", direction=firestore.Query.DESCENDING
+    ).stream()
+    return [doc.to_dict() for doc in docs]
+
+
+def update_user_status(email: str, status: str, role: str | None = None) -> None:
+    """Päivittää käyttäjän tilan (ja roolin) Firestoreen.
+
+    Args:
+        email:  Käyttäjän sähköpostiosoite.
+        status: Uusi tila ('authorized', 'denied', 'pending').
+        role:   Uusi rooli ('admin', 'user') — valinnainen.
+    """
+    db = get_db()
+    update: dict = {"status": status}
+    if role is not None:
+        update["role"] = role
+    db.collection("users").document(email).update(update)

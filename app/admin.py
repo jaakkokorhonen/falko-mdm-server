@@ -1,14 +1,19 @@
-"""Admin API — laitelistaus ja komentojen lähettäminen.
+"""Admin API — laitelistaus, komentojen lähettäminen ja käyttäjähallinta.
 
 Endpointit:
-  GET  /admin/devices                   — lista kaikista laitteista (sivutettu)
-  GET  /admin/devices/<udid>             — yksittäisen laitteen tiedot
-  POST /admin/devices/<udid>/command     — lisää komento laitteen jonoon
-  POST /admin/devices/<udid>/push        — lähetä APNs-herätys
+  GET  /admin/devices                       — lista kaikista laitteista (sivutettu)
+  GET  /admin/devices/<udid>                 — yksittäisen laitteen tiedot
+  POST /admin/devices/<udid>/command         — lisää komento laitteen jonoon
+  POST /admin/devices/<udid>/push            — lähetä APNs-herätys
+  GET  /admin/users                          — listaa kaikki OIDC-käyttäjät (vain admin)
+  POST /admin/users/<email>/authorize        — hyväksy käyttäjän pääsypyyntö
+  POST /admin/users/<email>/deny             — evää käyttäjän pääsypyyntö
 
-Autentikaatio: Google Identity-Aware Proxy (IAP).
-  - Selain: IAP-cookie + X-Goog-IAP-JWT-Assertion
-  - Skriptit: Authorization: Bearer <ADMIN_TOKEN> (env-muuttuja ADMIN_TOKEN)
+Autentikaatio:
+  - IAP: X-Goog-IAP-JWT-Assertion
+  - Google OAuth ID Token: Authorization: Bearer <google_id_token>
+  - Admin Token: Authorization: Bearer <ADMIN_TOKEN>
+  Lisäksi Google OAuth -käyttäjät tarkistetaan Firestoren users-kokoelmasta.
 
 Security note: require_auth verifioi X-Goog-IAP-JWT-Assertion kryptografisesti
 google-auth-kirjastolla (id_token.verify_token). Pelkkä header-tarkistus ei riitä —
@@ -29,8 +34,17 @@ from flask import Blueprint, request, jsonify, Response
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
-from .db import list_devices, get_device, enqueue_command
+from .db import (
+    list_devices, get_device, enqueue_command,
+    get_user, upsert_user, list_users, update_user_status,
+)
 from .apns import send_push
+
+# Suorat pääsyoikeudet email-osoitteen perusteella (bootstrap admin).
+# Nämä käyttäjät saavat pääsyn automaattisesti ilman Firestore-tarkistusta.
+_BOOTSTRAP_ADMINS: frozenset[str] = frozenset({
+    "jaakko.korhonen@gmail.com",
+})
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 logger = logging.getLogger(__name__)
@@ -99,8 +113,6 @@ def _verify_iap_jwt(iap_jwt: str) -> str | None:
 def _verify_google_oauth_token(token: str) -> str | None:
     """Verifioi Google OAuth ID Tokenin (JWT) ja palauttaa sähköpostin tai None."""
     try:
-        # verify_oauth2_token tarkistaa allekirjoituksen, vanhentumisen ja kohdeyleisön.
-        # Käyttöliittymä lähettää Google ID tokenin täällä.
         id_info = id_token.verify_oauth2_token(token, google_requests.Request())
         return id_info.get("email")
     except Exception as exc:
@@ -108,16 +120,42 @@ def _verify_google_oauth_token(token: str) -> str | None:
         return None
 
 
+def _check_user_access(email: str) -> tuple[bool, str, int]:
+    """Tarkistaa onko sähköpostiosoitteella pääsyoikeus palveluun.
+
+    Bootstrap-adminit pääsevät aina sisään. Muiden käyttäjien tila
+    luetaan Firestoresta. Jos käyttäjää ei löydy, luodaan 'pending'-tietue.
+
+    Returns:
+        (allowed, reason, http_status): Sallitaanko pääsy, virheviesti ja HTTP-koodi.
+    """
+    # Bootstrap-admineilla ehdoton pääsy ilman DB-tarkistusta
+    if email in _BOOTSTRAP_ADMINS:
+        # Varmistetaan silti että admin-tietue on kannassa (ensimmäinen kirjautuminen)
+        upsert_user(email, role="admin", status="authorized")
+        return True, "", 200
+
+    user = upsert_user(email, role="user", status="pending")
+    status = user.get("status", "pending")
+
+    if status == "authorized":
+        return True, "", 200
+    if status == "denied":
+        return False, "Käyttöoikeutesi on evätty. Ota yhteyttä ylläpitäjään.", 403
+    # pending tai tuntematon tila
+    return False, "Käyttöoikeutesi on vielä käsittelyssä. Odota ylläpitäjän hyväksyntää.", 403
+
+
 def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
     """Dekoraattori: autentikoi pyyntö IAP JWT:llä, Google OAuth tokenilla tai ADMIN_TOKENilla.
 
     Hyväksyntäjärjestys:
-      1. IAP: verifioi X-Goog-IAP-JWT-Assertion kryptografisesti, tarkista @falko.fi-domain.
-         Tämä on ensisijainen tapa — selainpyynnöt käyttävät automaattisesti IAP-cookieta.
-      2. Bearer token: Authorization: Bearer <ADMIN_TOKEN> tai <GOOGLE_OAUTH_ID_TOKEN>
-         (tukee kehittäjien Google-kirjautumista tai skriptejä).
+      1. IAP: verifioi X-Goog-IAP-JWT-Assertion kryptografisesti.
+      2. Bearer token: Authorization: Bearer <GOOGLE_OAUTH_ID_TOKEN> tai <ADMIN_TOKEN>.
+         Google-tokenille tarkistetaan myös Firestoren luvitusstatus.
 
-    Jos kumpikaan ei onnistu, palautetaan 401 tai 403.
+    Jos autentikointi ei onnistu, palautetaan 401. Jos käyttäjä on tunnettu
+    mutta ei vielä hyväksytty, palautetaan 403 + kuvaus.
 
     Args:
         f: Suojattava reittifunktio.
@@ -133,25 +171,27 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
             email = _verify_iap_jwt(iap_jwt)
             if email is None:
                 return jsonify({"error": "IAP JWT-assertion verifiointi epäonnistui"}), 401
-            if not (email.endswith("@falko.fi") or email == "jaakko.korhonen@gmail.com"):
-                return jsonify({"error": "Käyttöoikeus evätty (vain falko.fi-käyttäjille)"}), 403
+            allowed, reason, code = _check_user_access(email)
+            if not allowed:
+                return jsonify({"error": reason}), code
             return f(*args, **kwargs)
 
-        # --- Vaihtoehto 2: Authorization Header (Admin Token tai Google OAuth ID Token) ---
+        # --- Vaihtoehto 2: Authorization Header ---
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header.split(" ")[1]
-            
-            # 2a. Tarkistetaan perinteinen ADMIN_TOKEN
+
+            # 2a. Perinteinen ADMIN_TOKEN (skriptit, CI)
             if ADMIN_TOKEN and token == ADMIN_TOKEN:
                 return f(*args, **kwargs)
-                
-            # 2b. Tarkistetaan Google OAuth ID Token
+
+            # 2b. Google OAuth ID Token — verifioi + tarkista luvitusstatus
             email = _verify_google_oauth_token(token)
             if email:
-                if email.endswith("@falko.fi") or email == "jaakko.korhonen@gmail.com":
-                    return f(*args, **kwargs)
-                return jsonify({"error": f"Käyttöoikeus evätty sähköpostille {email}"}), 403
+                allowed, reason, code = _check_user_access(email)
+                if not allowed:
+                    return jsonify({"error": reason}), code
+                return f(*args, **kwargs)
 
         # Kumpaakaan hyväksyttyä autentikaatiotapaa ei löydy.
         return jsonify({"error": "Autentikaatio puuttuu tai on virheellinen"}), 401
@@ -303,3 +343,57 @@ def trigger_push(udid: str) -> Response:
     if ok:
         return jsonify({"status": "push sent"}), 200
     return jsonify({"error": "APNs push epäonnistui"}), 502
+
+
+# --- Käyttäjähallinta (OIDC SSO luvitusjärjestelmä) ---------------------------
+
+@admin_bp.get("/users")
+@require_auth
+def list_all_users() -> Response:
+    """Listaa kaikki OIDC-kirjautumista yrittäneet käyttäjät.
+
+    Vain admin-roolin käyttäjät voivat kutsua tätä endpointtia.
+
+    Returns:
+        Response: JSON { users, count } ja 200 OK.
+    """
+    users = list_users()
+    return jsonify({"users": users, "count": len(users)})
+
+
+@admin_bp.post("/users/<path:email>/authorize")
+@require_auth
+def authorize_user(email: str) -> Response:
+    """Hyväksyy käyttäjän pääsypyynnön.
+
+    Args:
+        email: Hyväksyttävän käyttäjän sähköpostiosoite.
+
+    Returns:
+        Response: 200 { status: "authorized" } tai 404.
+    """
+    user = get_user(email)
+    if not user:
+        return jsonify({"error": "Käyttäjää ei löydy"}), 404
+    update_user_status(email, status="authorized")
+    logger.info("Käyttäjä hyväksytty: %s", email)
+    return jsonify({"status": "authorized", "email": email})
+
+
+@admin_bp.post("/users/<path:email>/deny")
+@require_auth
+def deny_user(email: str) -> Response:
+    """Evää käyttäjän pääsyoikeuden.
+
+    Args:
+        email: Evättävän käyttäjän sähköpostiosoite.
+
+    Returns:
+        Response: 200 { status: "denied" } tai 404.
+    """
+    user = get_user(email)
+    if not user:
+        return jsonify({"error": "Käyttäjää ei löydy"}), 404
+    update_user_status(email, status="denied")
+    logger.info("Käyttäjältä evätty pääsy: %s", email)
+    return jsonify({"status": "denied", "email": email})
