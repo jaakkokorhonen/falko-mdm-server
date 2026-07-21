@@ -255,3 +255,15 @@ Määritä Cloud Build Triggerissä seuraavat käyttäjän määrittämät muutt
 *   `_APNS_KEY_ID` (APNs Key ID)
 *   `_SECRET_KEY` (Flask session secret key)
 
+---
+
+## Tuotantoympäristön arkkitehtuuri (Terraform)
+
+Terraform-hakemisto (`terraform/`) luo tuotantovalmiin, tietoturvallisen ja vikasietoisen infrastruktuurin:
+- **Tietoturva (Cloud Armor):** Rajaa ja rajoittaa pyyntömäärät tasoon 100 req/min per IP-osoite (`security.tf`).
+- **Verkko (VPC Egress & Cloud NAT):** Kaikki ulospäin suuntautuva liikenne (mukaan lukien yhteys Applen APNs-palveluun) ohjataan Serverless VPC Access Connectorin ja Cloud NAT -yhdyskäytävän kautta kiinteillä IP-osoitteilla (`network.tf`).
+- **Tietojen palautus (PITR & Varmuuskopiot):** Firestorelle on otettu käyttöön Point-in-Time Recovery (PITR) sekä päivittäiset automaattiset varmuuskopiot (`main.tf`).
+- **Audit-logitus (BigQuery):** Kaikki järjestelmän audit-tapahtumat ohjataan Log Sinkingin kautta automaattisesti BigQueryyn tallennettavaksi (`main.tf`).
+- **Valvonta (Cloud Monitoring):** Kriittisistä virheistä ja APNs-varmenteen vanhentumisesta on luotu logipohjaiset hälytysrajat ilman sähköpostihälytyksiä (`monitoring.tf`).
+
+
