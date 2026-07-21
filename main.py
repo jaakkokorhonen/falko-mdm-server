@@ -12,6 +12,7 @@ Parannus (2026-07): middleware (security headers, rate limiting) rekisteröity.
 """
 import os
 import logging
+from flask import Flask
 from flask_cors import CORS
 from app.mdm import mdm_bp
 from app.checkin import checkin_bp
