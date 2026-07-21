@@ -1,18 +1,18 @@
 """Admin API — laitelistaus ja komentojen lähettäminen.
 
 Endpointit:
-  GET  /admin/devices              — lista kaikista laitteista
-  GET  /admin/devices/<udid>        — yksittäisen laitteen tiedot
-  POST /admin/devices/<udid>/command — lisää komento laitteen jonoon
-  POST /admin/devices/<udid>/push   — lähetä APNs herätys
+  GET  /admin/devices                   — lista kaikista laitteista
+  GET  /admin/devices/<udid>             — yksittäisen laitteen tiedot
+  POST /admin/devices/<udid>/command     — lisää komento laitteen jonoon
+  POST /admin/devices/<udid>/push        — lähetä APNs-herätys
 
 Autentikaatio: Google Identity-Aware Proxy (IAP).
-  - Selain: IAP-cookie + X-Goog-Authenticated-User-Email + X-Goog-IAP-JWT-Assertion
+  - Selain: IAP-cookie + X-Goog-IAP-JWT-Assertion
   - Skriptit: Authorization: Bearer <ADMIN_TOKEN> (env-muuttuja ADMIN_TOKEN)
 
-Security note: Pelkkä header-tarkistus ei riitä — JWT-assertion verifioidaan
-kryptografisesti Googlen julkisilla avaimilla (google-auth). Muutoin hyökkääjä
-voi spoofattaa X-Goog-Authenticated-User-Email -otsakkeen ohittaen IAP:n.
+Security note: require_auth verifioi X-Goog-IAP-JWT-Assertion kryptografisesti
+google-auth-kirjastolla (id_token.verify_token). Pelkkä header-tarkistus ei riitä —
+kuka tahansa ennen IAP-kerrosta pääsevä voi spoofattaa X-Goog-Authenticated-User-Email.
 Ref: https://cloud.google.com/iap/docs/signed-headers-howto
 """
 import os
@@ -79,7 +79,7 @@ def _verify_iap_jwt(iap_jwt: str) -> str | None:
 
 
 def require_auth(f):
-    """Decorator: autentikoi pyyntö IAP JWT:llä tai ADMIN_TOKEN-fallbackilla.
+    """Dekoraattori: autentikoi pyyntö IAP JWT:llä tai ADMIN_TOKEN-fallbackilla.
 
     Hyväksyntäjärjestys:
       1. IAP: verifioi X-Goog-IAP-JWT-Assertion kryptografisesti, tarkista @falko.fi-domain
@@ -114,7 +114,11 @@ def require_auth(f):
 @admin_bp.get("/devices")
 @require_auth
 def list_all_devices():
-    """Listaa kaikki rekisteröidyt laitteet."""
+    """Listaa kaikki rekisteröidyt laitteet.
+
+    Returns:
+        JSON { devices: [...], count: int }
+    """
     devices = list_devices()
     return jsonify({"devices": devices, "count": len(devices)})
 
@@ -122,7 +126,14 @@ def list_all_devices():
 @admin_bp.get("/devices/<udid>")
 @require_auth
 def get_one_device(udid: str):
-    """Palauttaa yksittäisen laitteen tiedot."""
+    """Palauttaa yksittäisen laitteen tiedot.
+
+    Args:
+        udid: Laitteen Apple-tunniste URL-polusta.
+
+    Returns:
+        JSON-laitetietue tai 404 jos laitetta ei löydy.
+    """
     device = get_device(udid)
     if not device:
         return jsonify({"error": "Laitetta ei löydy"}), 404
@@ -134,21 +145,30 @@ def get_one_device(udid: str):
 def send_command(udid: str):
     """Lisää MDM-komennon laitteen jonoon.
 
-    Body (JSON):
-      {
-        "command_type": "DeviceInformation",  // Apple MDM RequestType
-        "payload": {}                          // Komennon lisäparametrit
-      }
+    Laite hakee komennon seuraavalla MDM-pollilla tai APNs-herätyksen
+    jälkeen. Komento ei siis toteudu välittömästi.
 
-    Tuetut komennot (yleisimmät):
-      DeviceInformation   — laitetietojen kysely
-      DeviceLock          — laite lukitaan välittömästi
-      EraseDevice         — laite pyyhitään
-      InstallApplication  — sovellusasennus (vaatii VPP)
-      RestartDevice       — uudelleenkäynnistys
-      ShutDownDevice      — sammutus
-      EnableRemoteDesktop — etätyöpöytä päälle
+    Body (JSON)::
+
+        {
+          "command_type": "DeviceInformation",
+          "payload": {}
+        }
+
+    Tuetut komennot (yleisimmät Apple MDM RequestTypet):
+      DeviceInformation    — laitetietojen kysely
+      DeviceLock           — laite lukitaan välittömästi
+      EraseDevice          — PERUUTTAMATON: laite pyyhitään
+      InstallApplication   — sovellusasennus (vaatii VPP-lisenssit)
+      RestartDevice        — uudelleenkäynnistys
+      ShutDownDevice       — PERUUTTAMATON: sammutus
+      EnableRemoteDesktop  — etätyöpöytä päälle
       DisableRemoteDesktop — etätyöpöytä pois
+
+    Returns:
+        202 Accepted { status: "queued", command_type } jos onnistui.
+        400 Bad Request jos command_type puuttuu.
+        404 jos laitetta ei löydy.
     """
     body = request.get_json(silent=True) or {}
     command_type = body.get("command_type")
@@ -163,6 +183,7 @@ def send_command(udid: str):
         "command_type": command_type,
         "payload": body.get("payload", {}),
         "status": "pending",
+        # ISO 8601 UTC -aikaleima järjestystä varten dequeue_command-kyselyssä
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     enqueue_command(udid, cmd)
@@ -174,7 +195,22 @@ def send_command(udid: str):
 @admin_bp.post("/devices/<udid>/push")
 @require_auth
 def trigger_push(udid: str):
-    """Lähettää APNs herätyksen laitteelle jotta se pollaa MDM-serveriä."""
+    """Lähettää APNs-herätyksen laitteelle.
+
+    Herätys ei sisällä komentoa — se vain käskee laitteen
+    ottamaan yhteyden MDM-serveriin ja hakemaan jonon.
+    APNs-tiedot (push_token, push_magic, topic) tallennetaan
+    CheckIn/TokenUpdate-viestissä.
+
+    Args:
+        udid: Laite jolle herätys lähetetään.
+
+    Returns:
+        200 { status: "push sent" } jos APNs hyväksyi pyynnön.
+        400 jos laitteen APNs-tiedot puuttuvat.
+        404 jos laitetta ei löydy.
+        502 jos APNs hylkäsi pyynnön.
+    """
     device = get_device(udid)
     if not device:
         return jsonify({"error": "Laitetta ei löydy"}), 404
@@ -182,13 +218,15 @@ def trigger_push(udid: str):
     push_token = device.get("push_token")
     push_magic = device.get("push_magic")
     topic = device.get("topic")
+    # Kaikki kolme vaaditaan APNs-yhteyteen. Ne tallennetaan vasta
+    # TokenUpdate-viestissä, joten uudet laitteet eivät välttämättä ole vielä valmiita.
     if not push_token or not push_magic or not topic:
         return jsonify({"error": "Laitteella ei ole riittäviä APNs-tietoja (push_token, push_magic, topic)"}), 400
 
+    # APNS_SANDBOX=true kehitysympäristössä, false (oletus) tuotannossa
     sandbox = os.environ.get("APNS_SANDBOX", "false").lower() == "true"
     ok = send_push(push_token, push_magic, topic, sandbox=sandbox)
 
     if ok:
         return jsonify({"status": "push sent"}), 200
-    else:
-        return jsonify({"error": "APNs push epäonnistui"}), 502
+    return jsonify({"error": "APNs push epäonnistui"}), 502
