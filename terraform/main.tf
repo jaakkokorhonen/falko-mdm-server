@@ -2,10 +2,19 @@
 # Huom: Jos tietokanta on jo luotu, tämä voidaan tuoda tilaan komennolla:
 # terraform import google_firestore_database.database "(default)"
 resource "google_firestore_database" "database" {
-  project     = var.gcp_project_id
-  name        = "(default)"
-  location_id = "europe-west3" # Firestoren sijainti (esim. europe-west3 / eur3)
-  type        = "FIRESTORE_NATIVE"
+  project                           = var.gcp_project_id
+  name                              = "(default)"
+  location_id                       = "europe-west3" # Firestoren sijainti (esim. europe-west3 / eur3)
+  type                              = "FIRESTORE_NATIVE"
+  point_in_time_recovery_enablement = "POINT_IN_TIME_RECOVERY_ENABLED"
+}
+
+# Päivittäinen Firestore-varmuuskopiointi (säilytys 7 päivää)
+resource "google_firestore_backup_schedule" "daily_backup" {
+  project  = var.gcp_project_id
+  database = google_firestore_database.database.name
+  retention = "604800s" # 7 days
+  daily_recurrence {}
 }
 
 # Secret Manager -salaisuus APNs-avaimelle
@@ -56,6 +65,11 @@ resource "google_cloud_run_v2_service" "mdm_server" {
 
   template {
     service_account = google_service_account.run_sa.email
+
+    vpc_access {
+      connector = google_vpc_access_connector.connector.id
+      egress    = "ALL_TRAFFIC"
+    }
 
     containers {
       image = var.container_image
