@@ -26,11 +26,10 @@ def mock_db_operations(mocker):
     """Mockaa kaikki db.py -tiedoston Firestore-operaatiot testien ajaksi."""
     mocker.patch("app.db.get_db")
     
-    # Mockataan admin.py -tiedostoon tuodut funktiot
-    mocker.patch("app.admin.list_devices", return_value=[
+    mocker.patch("app.admin.list_devices", return_value=([
         {"udid": "device-1", "model": "MacBookAir10,1"},
         {"udid": "device-2", "model": "MacBookPro18,2"}
-    ])
+    ], None))
     mocker.patch("app.admin.get_device", return_value={
         "udid": "test-udid",
         "push_magic": "magic-token",
