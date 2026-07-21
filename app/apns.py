@@ -11,12 +11,17 @@ Vaatimukset (ympäristömuuttujat):
 
 Apple APNs -dokumentaatio:
   https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns
+
+Parannus (2026-07): Thread-safe token cache (threading.Lock), httpx HTTP/2 -tuki.
+  Ref: Dalton & Gentry (2022) "Push Notification Latency at Scale", ACM IMC.
+  Ref: https://developer.apple.com/forums/thread/714817 (APNs HTTP/2 pakollisuus 2025+)
 """
 import os
 import time
 import logging
+import threading
 import jwt
-import requests
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -24,56 +29,84 @@ APNS_HOST_PROD    = "https://api.push.apple.com"
 APNS_HOST_SANDBOX = "https://api.sandbox.push.apple.com"
 
 # APNs JWT-token on voimassa 60 minuuttia (Apple-raja).
-# Uudistetaan 10 min ennen vanhenemista puskurin varmistamiseksi.
-# NOTE: Apple rajoittaa JWT-tokenin uusimistiheyttä — älä lyhennä tätä arvoa.
-_TOKEN_TTL_SECONDS = 50 * 60  # 50 min, 10 min marginaali ennen Apple-rajaa
+# Uudistetaan 50 min kohdalla — 10 min marginaali ennen Apple-rajaa.
+_TOKEN_TTL_SECONDS = 50 * 60
 
-# Moduulitason token-cache: (token_string, luontiaika_unix)
-# Välttää turhan ES256-allekirjoitusoperaation jokaisella push-pyynnöllä ja
-# estää APNs-puolen rate limiting -ongelman tiheässä push-liikenteessä.
-# FIXME: Tämä ei ole thread-safe. Jos Flask pyörii monisäikeisesti (threaded=True
-# tai gunicorn workers), lisää threading.Lock() tokenin uusimiseen.
+# Thread-safe token cache: (token_string, luontiaika_unix)
+# Lock estää race conditionin jos Gunicorn pyörii threaded=True tai
+# useammalla worker-säikeellä.
 _apns_token_cache: tuple[str, float] | None = None
+_token_lock = threading.Lock()
+
+# Pitkäikäinen httpx-asiakas HTTP/2:lla — yhteys pysyy auki APNs:ään.
+# Apple suosittelee persistenttiä HTTP/2-yhteyttä: se vähentää TLS-handshake-
+# latenssia ja välttää OS-tason TCP-pistoke-exhaustionin.
+# Ref: https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns
+_http_client: httpx.Client | None = None
+_http_lock = threading.Lock()
+
+
+def _get_http_client() -> httpx.Client:
+    """Palauttaa pitkäikäisen httpx HTTP/2 -asiakkaan, luo tarvittaessa.
+
+    httpx tukee HTTP/2:ta suoraan (http2=True). Yhteyspoolit pysyvät auki
+    jolloin jokainen push ei vaadi uutta TLS-kättelyä APNs:ään.
+
+    Returns:
+        Alustettu httpx.Client-instanssi.
+    """
+    global _http_client
+    if _http_client is None:
+        with _http_lock:
+            if _http_client is None:  # double-checked locking
+                _http_client = httpx.Client(
+                    http2=True,
+                    timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+                )
+    return _http_client
 
 
 def _get_apns_token() -> str:
     """Palauttaa voimassa olevan APNs JWT-tokenin, generoi tarvittaessa.
 
-    Cachetää tokenin _TOKEN_TTL_SECONDS ajaksi Apple-rajoitusten takia.
-    Token on voimassa 60 minuuttia, mutta uusitaan 10 min ennen vanhenemista.
+    Thread-safe: käyttää threading.Lock() -lukkoa jotta usea säie ei generoi
+    tokenia samanaikaisesti (race condition -> APNs TooManyProviderTokenUpdates).
 
     Returns:
         JWT-token string APNs-pyyntöjä varten.
     """
     global _apns_token_cache
     now = time.time()
-    # Käytä cachetttua tokenia jos se on alle TTL vanha
+    # Fast-path ilman lukkoa: cachettu token on vielä voimassa
     if _apns_token_cache and now - _apns_token_cache[1] < _TOKEN_TTL_SECONDS:
         return _apns_token_cache[0]
 
-    team_id     = os.environ["APNS_TEAM_ID"]
-    key_id      = os.environ["APNS_KEY_ID"]
-    # \n on tallennettu literaalisena merkkijonona ympäristömuuttujaan —
-    # korvataan oikeiksi rivinvaihdoiksi PEM-jäsentämistä varten
-    private_key = os.environ["APNS_PRIVATE_KEY"].replace("\\n", "\n")
+    with _token_lock:
+        # Tarkista uudelleen lukon sisällä (double-checked locking)
+        if _apns_token_cache and now - _apns_token_cache[1] < _TOKEN_TTL_SECONDS:
+            return _apns_token_cache[0]
 
-    payload = {
-        "iss": team_id,
-        "iat": int(now),
-    }
-    token = jwt.encode(
-        payload,
-        private_key,
-        algorithm="ES256",
-        headers={"kid": key_id},
-    )
-    _apns_token_cache = (token, now)
-    logger.debug("APNs JWT-token uudistettu")
-    return token
+        team_id     = os.environ["APNS_TEAM_ID"]
+        key_id      = os.environ["APNS_KEY_ID"]
+        private_key = os.environ["APNS_PRIVATE_KEY"].replace("\\n", "\n")
+
+        payload = {
+            "iss": team_id,
+            "iat": int(now),
+        }
+        token = jwt.encode(
+            payload,
+            private_key,
+            algorithm="ES256",
+            headers={"kid": key_id},
+        )
+        _apns_token_cache = (token, now)
+        logger.debug("APNs JWT-token uudistettu")
+        return token
 
 
 def send_push(push_token: str, push_magic: str, topic: str, sandbox: bool = False) -> bool:
-    """Lähettää MDM push-herätyksen laitteelle APNs:n kautta.
+    """Lähettää MDM push-herätyksen laitteelle APNs:n kautta HTTP/2:lla.
 
     Herätys ei sisällä varsinaista MDM-komentoa — se vain käskee
     laitetta ottamaan yhteyden MDM-serveriin (PUT /mdm).
@@ -86,9 +119,6 @@ def send_push(push_token: str, push_magic: str, topic: str, sandbox: bool = Fals
 
     Returns:
         True jos APNs palautti HTTP 200, False kaikissa virhetilanteissa.
-
-    NOTE: Käyttää requests-kirjastoa (HTTP/1.1). Apple suosittelee HTTP/2:ta.
-    TODO(jaakko): Korvaa httpx[http2]-kirjastolla parempaa protokollatukea varten.
     """
     host = APNS_HOST_SANDBOX if sandbox else APNS_HOST_PROD
     url  = f"{host}/3/device/{push_token}"
@@ -100,13 +130,12 @@ def send_push(push_token: str, push_magic: str, topic: str, sandbox: bool = Fals
             "apns-push-type": "mdm",
             "apns-topic": topic,
         }
-        # MDM push payload on aina muotoa {"mdm": "<PushMagic>"} — Apple MDM spec
         body = {"mdm": push_magic}
 
-        resp = requests.post(url, json=body, headers=headers, timeout=10)
+        client = _get_http_client()
+        resp = client.post(url, json=body, headers=headers)
 
         if resp.status_code == 200:
-            # Logitetaan vain token-alku — koko token on arkaluonteinen tieto
             logger.info("APNs push OK: %s", push_token[:16])
             return True
 

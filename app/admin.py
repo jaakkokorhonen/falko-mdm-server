@@ -1,7 +1,7 @@
 """Admin API — laitelistaus ja komentojen lähettäminen.
 
 Endpointit:
-  GET  /admin/devices                   — lista kaikista laitteista
+  GET  /admin/devices                   — lista kaikista laitteista (sivutettu)
   GET  /admin/devices/<udid>             — yksittäisen laitteen tiedot
   POST /admin/devices/<udid>/command     — lisää komento laitteen jonoon
   POST /admin/devices/<udid>/push        — lähetä APNs-herätys
@@ -14,16 +14,18 @@ Security note: require_auth verifioi X-Goog-IAP-JWT-Assertion kryptografisesti
 google-auth-kirjastolla (id_token.verify_token). Pelkkä header-tarkistus ei riitä —
 kuka tahansa ennen IAP-kerrosta pääsevä voi spoofattaa X-Goog-Authenticated-User-Email.
 Ref: https://cloud.google.com/iap/docs/signed-headers-howto
+
+Parannus (2026-07): list_devices tukee sivutusta, command_type validoitu
+  sallittujen arvojen listaa vasten (allowlist), structured logging.
+  Ref: OWASP API Security Top 10 (2023) API3:2023 Broken Object Property Level Authorization.
 """
 import os
 import logging
 from datetime import datetime, timezone
 from functools import wraps
+from typing import Callable, Any
 from flask import Blueprint, request, jsonify, Response
 
-# google-auth validoi IAP JWT-assertion kryptografisesti Googlen julkisia avaimia vasten.
-# Tämä on pakollinen askel tuotannossa: ilman tätä verkkokerrokseen ennen Cloud Runia
-# pääsevä hyökkääjä voi spoofattaa X-Goog-Authenticated-User-Email -otsakkeen.
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
@@ -33,25 +35,28 @@ from .apns import send_push
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 logger = logging.getLogger(__name__)
 
-# IAP JWT-assertion verifiointiin tarvitaan audience-arvo, joka on
-# muotoa /projects/<project_number>/apps/<project_id>.
-# Aseta Cloud Runin ympäristömuuttujaan IAP_AUDIENCE.
-# Löydät arvon: gcloud iap web describe --resource-type=backend-services
 IAP_AUDIENCE = os.environ.get("IAP_AUDIENCE", "")
+ADMIN_TOKEN  = os.environ.get("ADMIN_TOKEN", "")
 
-# Fallback-token skriptikäyttöön (CI, curl-testit).
-# Jos ADMIN_TOKEN on asetettu, se hyväksytään IAP-tarkistuksen ohella.
-# NOTE: Aseta vahva (>= 32 merkkiä) satunnainen arvo, esim:
-#   openssl rand -base64 32 | gcloud secrets create falko-admin-token --data-file=-
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+# Sallitut MDM command_type -arvot.
+# Allowlist estää mielivaltaisten RequestType-arvojen injektoinnin Apple-protokollaan.
+# Ref: OWASP ASVS v4.0 §5.1.3 — Positive server-side input validation.
+_ALLOWED_COMMANDS: frozenset[str] = frozenset({
+    "DeviceInformation",
+    "DeviceLock",
+    "EraseDevice",
+    "InstallApplication",
+    "RestartDevice",
+    "ShutDownDevice",
+    "EnableRemoteDesktop",
+    "DisableRemoteDesktop",
+    "ScheduleOSUpdate",
+    "ActiveNSExtensions",
+})
 
 
 def _verify_iap_jwt(iap_jwt: str) -> str | None:
     """Verifioi Google IAP JWT-assertion ja palauttaa sähköpostin tai None.
-
-    Verifioi allekirjoituksen Googlen julkisilla avaimilla (ES256).
-    Palauttaa sähköpostin muodossa 'user@falko.fi',
-    tai None jos JWT on virheellinen tai vanhentunut.
 
     Args:
         iap_jwt: X-Goog-IAP-JWT-Assertion -otsakkeen arvo.
@@ -60,8 +65,6 @@ def _verify_iap_jwt(iap_jwt: str) -> str | None:
         Käyttäjän sähköpostiosoite tai None.
     """
     if not IAP_AUDIENCE:
-        # NOTE: IAP_AUDIENCE puuttuu — JWT-assertion verifiointia ei voida tehdä.
-        # Tuotannossa tämä on virheellinen tila; local-kehityksessä hyväksyttävä.
         logger.warning("IAP_AUDIENCE ei ole asetettu — JWT-assertion verifiointia ei tehdä")
         return None
     try:
@@ -71,23 +74,14 @@ def _verify_iap_jwt(iap_jwt: str) -> str | None:
             audience=IAP_AUDIENCE,
             certs_url="https://www.gstatic.com/iap/verify/public_key",
         )
-        # JWT:n email-kenttä on muotoa "user@falko.fi"
         return info.get("email")
     except Exception as exc:
         logger.warning("IAP JWT-assertion verifiointi epäonnistui: %s", exc)
         return None
 
 
-from typing import Callable, Any
-
 def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
     """Dekoraattori: autentikoi pyyntö IAP JWT:llä tai ADMIN_TOKEN-fallbackilla.
-
-    Hyväksyntäjärjestys:
-      1. IAP: verifioi X-Goog-IAP-JWT-Assertion kryptografisesti, tarkista @falko.fi-domain
-      2. Bearer token: Authorization: Bearer <ADMIN_TOKEN> (skriptikäyttö)
-
-    Jos kumpikaan ei onnistu, palautetaan 401 tai 403.
 
     Args:
         f: Suojattava reittifunktio.
@@ -97,7 +91,6 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
     """
     @wraps(f)
     def decorated(*args: Any, **kwargs: Any) -> Any:
-        # --- Vaihtoehto 1: IAP JWT-assertion (selainpyynnöt) ---
         iap_jwt = request.headers.get("X-Goog-IAP-JWT-Assertion", "")
         if iap_jwt:
             email = _verify_iap_jwt(iap_jwt)
@@ -107,13 +100,10 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
                 return jsonify({"error": "Käyttöoikeus evätty (vain falko.fi-käyttäjille)"}), 403
             return f(*args, **kwargs)
 
-        # --- Vaihtoehto 2: Bearer-token fallback (skriptit, CI) ---
-        # NOTE: ADMIN_TOKEN on oltava asetettu; tyhjä arvo hylätään aina.
         auth_header = request.headers.get("Authorization", "")
         if ADMIN_TOKEN and auth_header == f"Bearer {ADMIN_TOKEN}":
             return f(*args, **kwargs)
 
-        # Kumpaakaan hyväksyttyä autentikaatiotapaa ei löydy.
         return jsonify({"error": "Autentikaatio puuttuu tai on virheellinen"}), 401
 
     return decorated
@@ -122,13 +112,27 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
 @admin_bp.get("/devices")
 @require_auth
 def list_all_devices() -> Response:
-    """Listaa kaikki rekisteröidyt laitteet.
+    """Listaa rekisteröidyt laitteet sivutettuna.
+
+    Query-parametrit:
+      page_size (int, 1–500): Laitteiden määrä per sivu. Oletus 100.
+      cursor (str):           Edellisen sivun viimeinen UDID (sivutuksen jatkaminen).
 
     Returns:
-        Response: Flask JSON-vastaus ja 200 OK.
+        Response: JSON { devices, count, next_cursor } ja 200 OK.
     """
-    devices = list_devices()
-    return jsonify({"devices": devices, "count": len(devices)})
+    try:
+        page_size = int(request.args.get("page_size", 100))
+    except ValueError:
+        return jsonify({"error": "page_size täytyy olla kokonaisluku"}), 400
+
+    cursor = request.args.get("cursor") or None
+    devices, next_cursor = list_devices(page_size=page_size, start_after=cursor)
+
+    resp = {"devices": devices, "count": len(devices)}
+    if next_cursor:
+        resp["next_cursor"] = next_cursor
+    return jsonify(resp)
 
 
 @admin_bp.get("/devices/<udid>")
@@ -142,7 +146,6 @@ def get_one_device(udid: str) -> Response:
     Returns:
         Response: JSON-laitetietue ja 200 OK tai virhe ja 404.
     """
-
     device = get_device(udid)
     if not device:
         return jsonify({"error": "Laitetta ei löydy"}), 404
@@ -154,9 +157,6 @@ def get_one_device(udid: str) -> Response:
 def send_command(udid: str) -> Response:
     """Lisää MDM-komennon laitteen jonoon.
 
-    Laite hakee komennon seuraavalla MDM-pollilla tai APNs-herätyksen
-    jälkeen. Komento ei siis toteudu välittömästi.
-
     Body (JSON)::
 
         {
@@ -164,27 +164,31 @@ def send_command(udid: str) -> Response:
           "payload": {}
         }
 
-    Tuetut komennot (yleisimmät Apple MDM RequestTypet):
-      DeviceInformation    — laitetietojen kysely
-      DeviceLock           — laite lukitaan välittömästi
-      EraseDevice          — PERUUTTAMATON: laite pyyhitään
-      InstallApplication   — sovellusasennus (vaatii VPP-lisenssit)
-      RestartDevice        — uudelleenkäynnistys
-      ShutDownDevice       — PERUUTTAMATON: sammutus
-      EnableRemoteDesktop  — etätyöpöytä päälle
-      DisableRemoteDesktop — etätyöpöytä pois
+    Sallitut command_type-arvot: DeviceInformation, DeviceLock, EraseDevice,
+    InstallApplication, RestartDevice, ShutDownDevice, EnableRemoteDesktop,
+    DisableRemoteDesktop, ScheduleOSUpdate, ActiveNSExtensions.
 
     Args:
         udid: Laitteen Apple-tunniste URL-polusta.
 
     Returns:
-        Response: 202 Accepted { status: "queued", command_type } jos onnistui,
-        tai virhe ja 400/404.
+        Response: 202 Accepted jos onnistui, tai virhe ja 400/404.
     """
     body = request.get_json(silent=True) or {}
     command_type = body.get("command_type")
     if not command_type:
         return jsonify({"error": "command_type vaaditaan"}), 400
+
+    # Allowlist-validointi: estetään tuntemattomat RequestType-arvot
+    if command_type not in _ALLOWED_COMMANDS:
+        logger.warning(
+            "Hylätty tuntematon command_type: %r (sallitut: %s)",
+            command_type, sorted(_ALLOWED_COMMANDS)
+        )
+        return jsonify({
+            "error": f"Tuntematon command_type: {command_type!r}",
+            "allowed": sorted(_ALLOWED_COMMANDS),
+        }), 400
 
     device = get_device(udid)
     if not device:
@@ -194,11 +198,13 @@ def send_command(udid: str) -> Response:
         "command_type": command_type,
         "payload": body.get("payload", {}),
         "status": "pending",
-        # ISO 8601 UTC -aikaleima järjestystä varten dequeue_command-kyselyssä
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     enqueue_command(udid, cmd)
-    logger.info("Komento lisätty jonoon: UDID=%s type=%s", udid, command_type)
+    logger.info(
+        "Komento lisätty jonoon",
+        extra={"udid": udid, "command_type": command_type},
+    )
 
     return jsonify({"status": "queued", "command_type": command_type}), 202
 
@@ -208,17 +214,11 @@ def send_command(udid: str) -> Response:
 def trigger_push(udid: str) -> Response:
     """Lähettää APNs-herätyksen laitteelle.
 
-    Herätys ei sisällä komentoa — se vain käskee laitteen
-    ottamaan yhteyden MDM-serveriin ja hakemaan jonon.
-    APNs-tiedot (push_token, push_magic, topic) tallennetaan
-    CheckIn/TokenUpdate-viestissä.
-
     Args:
         udid: Laite jolle herätys lähetetään.
 
     Returns:
-        Response: 200 { status: "push sent" } jos APNs hyväksyi pyynnön,
-        tai virhe ja 400/404/502.
+        Response: 200 { status: "push sent" } tai virhe ja 400/404/502.
     """
     device = get_device(udid)
     if not device:
@@ -227,16 +227,12 @@ def trigger_push(udid: str) -> Response:
     push_token = device.get("push_token")
     push_magic = device.get("push_magic")
     topic = device.get("topic")
-    # Kaikki kolme vaaditaan APNs-yhteyteen. Ne tallennetaan vasta
-    # TokenUpdate-viestissä, joten uudet laitteet eivät välttämättä ole vielä valmiita.
     if not push_token or not push_magic or not topic:
         return jsonify({"error": "Laitteella ei ole riittäviä APNs-tietoja (push_token, push_magic, topic)"}), 400
 
-    # APNS_SANDBOX=true kehitysympäristössä, false (oletus) tuotannossa
     sandbox = os.environ.get("APNS_SANDBOX", "false").lower() == "true"
     ok = send_push(push_token, push_magic, topic, sandbox=sandbox)
 
     if ok:
         return jsonify({"status": "push sent"}), 200
     return jsonify({"error": "APNs push epäonnistui"}), 502
-
