@@ -20,6 +20,7 @@ import os
 import time
 import logging
 import threading
+import atexit
 import jwt
 import httpx
 
@@ -30,6 +31,7 @@ APNS_HOST_SANDBOX = "https://api.sandbox.push.apple.com"
 
 # APNs JWT-token on voimassa 60 minuuttia (Apple-raja).
 # Uudistetaan 50 min kohdalla — 10 min marginaali ennen Apple-rajaa.
+# NOTE: Apple rajoittaa JWT-tokenin uusimistiheyttä — älä lyhennä tätä arvoa.
 _TOKEN_TTL_SECONDS = 50 * 60
 
 # Thread-safe token cache: (token_string, luontiaika_unix)
@@ -66,6 +68,12 @@ def _get_http_client() -> httpx.Client:
     return _http_client
 
 
+# Graceful shutdown: suljetaan httpx-yhteys prosessin lopussa.
+# Ilman tätä yhteys katkeaa raa'asti, mikä voi aiheuttaa virheitä
+# Gunicornin graceful shutdown -sekvenssissä.
+atexit.register(lambda: _http_client.close() if _http_client else None)
+
+
 def _get_apns_token() -> str:
     """Palauttaa voimassa olevan APNs JWT-tokenin, generoi tarvittaessa.
 
@@ -88,6 +96,8 @@ def _get_apns_token() -> str:
 
         team_id     = os.environ["APNS_TEAM_ID"]
         key_id      = os.environ["APNS_KEY_ID"]
+        # \n on tallennettu literaalisena merkkijonona ympäristömuuttujaan —
+        # korvataan oikeiksi rivinvaihdoiksi PEM-jäsentämistä varten
         private_key = os.environ["APNS_PRIVATE_KEY"].replace("\\n", "\n")
 
         payload = {
@@ -130,12 +140,15 @@ def send_push(push_token: str, push_magic: str, topic: str, sandbox: bool = Fals
             "apns-push-type": "mdm",
             "apns-topic": topic,
         }
+        # Apple MDM spec: push payload on AINA juuri tässä muodossa — ei muita kenttiä.
+        # Laitteen MDM-agentti tunnistaa sen PushMagic-arvosta ja ottaa yhteyttä serveriin.
         body = {"mdm": push_magic}
 
         client = _get_http_client()
         resp = client.post(url, json=body, headers=headers)
 
         if resp.status_code == 200:
+            # Logitetaan vain token-alku — koko token on arkaluonteinen tieto
             logger.info("APNs push OK: %s", push_token[:16])
             return True
 

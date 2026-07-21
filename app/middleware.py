@@ -28,6 +28,8 @@ _RATE_LIMIT_REQUESTS = 60   # max pyyntöä
 _RATE_LIMIT_WINDOW   = 60   # sekunteina (sliding window)
 
 # In-memory store: ip -> deque(timestamps)
+# HUOM: Ei jaettu Cloud Run -instanssien välillä — jokainen instanssi
+# pitää omaa laskuriaan. Tuotannossa käytä flask-limiter + Redis.
 _request_counts: dict[str, deque] = defaultdict(deque)
 _rate_lock = threading.Lock()
 
@@ -53,6 +55,11 @@ def _is_rate_limited(ip: str) -> bool:
         if len(dq) >= _RATE_LIMIT_REQUESTS:
             return True
         dq.append(now)
+        # Siivoa tyhjät IP-avaimet muistivuodon estämiseksi.
+        # defaultdict luo uuden deque:n jokaiselle IP:lle — ilman siivousta
+        # sanakirja kasvaa rajatta pitkässä tuotantoajossa.
+        if not dq:
+            del _request_counts[ip]
         return False
 
 
