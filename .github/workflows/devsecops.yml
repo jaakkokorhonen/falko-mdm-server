@@ -37,7 +37,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install bandit pip-audit checkov
+          pip install bandit pip-audit checkov pytest-cov
 
       # 5. Sovelluksen haavoittuvuuksien skannaus (Bandit SAST)
       - name: Run Bandit SAST Scan
@@ -54,7 +54,7 @@ jobs:
         run: |
           checkov -d terraform/ --framework terraform
 
-      # 8. Yksikkötestien suoritus (Pytest)
-      - name: Run Pytest Unit Tests
+      # 8. Yksikkötestien suoritus kattavuusraportilla (Pytest)
+      - name: Run Pytest Unit Tests with Coverage
         run: |
-          PYTHONPATH=. pytest -v
+          PYTHONPATH=. pytest -v --cov=app --cov-report=term-missing
