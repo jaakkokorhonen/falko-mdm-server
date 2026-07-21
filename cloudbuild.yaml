@@ -1,0 +1,48 @@
+# Cloud Build -pipeline: rakentaa Docker-imagen ja deployaa Cloud Runiin
+# Triggeröi automaattisesti kun push main-haaraan
+#
+# Vaatimukset GCP:ssä:
+#   gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
+#   gcloud artifacts repositories create falko --repository-format=docker --location=europe-north1
+
+steps:
+  # 1. Rakennetaan Docker-image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - '-t'
+      - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:$COMMIT_SHA'
+      - '-t'
+      - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:latest'
+      - '.'
+
+  # 2. Pushataan Artifact Registryyn
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - '--all-tags'
+      - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server'
+
+  # 3. Deployataan Cloud Runiin
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - falko-mdm-server
+      - '--image=europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:$COMMIT_SHA'
+      - '--region=europe-north1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID'
+      - '--min-instances=0'
+      - '--max-instances=10'
+      - '--memory=512Mi'
+      - '--cpu=1'
+
+images:
+  - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:$COMMIT_SHA'
+  - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

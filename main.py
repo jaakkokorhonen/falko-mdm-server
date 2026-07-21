@@ -1,0 +1,25 @@
+import os
+from flask import Flask
+from app.mdm import mdm_bp
+from app.checkin import checkin_bp
+from app.admin import admin_bp
+
+def create_app():
+    app = Flask(__name__)
+    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-me")
+
+    app.register_blueprint(mdm_bp)
+    app.register_blueprint(checkin_bp)
+    app.register_blueprint(admin_bp)
+
+    @app.get("/healthz")
+    def health():
+        return {"status": "ok"}, 200
+
+    return app
+
+app = create_app()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False)

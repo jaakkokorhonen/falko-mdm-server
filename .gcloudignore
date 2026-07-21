@@ -1,0 +1,13 @@
+.gcloudignore
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.*
+venv/
+.venv/
+tests/
+*.test.py
+README.md
