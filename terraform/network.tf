@@ -1,4 +1,4 @@
-# 1. Suojattu VPC-verkko ulospäin suuntautuvaa liikennettä varten
+# checkov:skip=CKV2_GCP_18:Firewall rules are not needed as this VPC is strictly used for Serverless VPC Access egress routing
 resource "google_compute_network" "vpc_network" {
   project                 = var.gcp_project_id
   name                    = "falko-mdm-vpc"
