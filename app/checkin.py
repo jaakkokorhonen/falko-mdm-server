@@ -18,7 +18,7 @@ voisi luoda odottamattoman dokumenttipolun. Ref: Fleet MDM CVE-2026-34385.
 import re
 import logging
 from datetime import datetime, timezone
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 from plistlib import loads as plist_loads, FMT_XML
 from .db import upsert_device
 
