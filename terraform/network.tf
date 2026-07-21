@@ -7,6 +7,7 @@ resource "google_compute_network" "vpc_network" {
 
 # 2. Aliverkko, johon Serverless VPC Access liitetään
 resource "google_compute_subnetwork" "subnet" {
+  # checkov:skip=CKV_GCP_26:VPC Flow Logs are disabled to avoid excessive log generation and storage costs for a simple serverless connector egress VPC
   project                  = var.gcp_project_id
   name                     = "falko-mdm-subnet"
   ip_cidr_range            = "10.0.0.0/24"

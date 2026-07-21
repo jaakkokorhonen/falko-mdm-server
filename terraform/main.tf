@@ -134,6 +134,7 @@ resource "google_cloud_run_domain_mapping" "api_mapping" {
 
 # BigQuery Dataset audit-logeille
 resource "google_bigquery_dataset" "audit_dataset" {
+  # checkov:skip=CKV_GCP_81:Google-managed encryption keys (default) are sufficient and preferred over CSEK/CMEK for simplicity and cost
   project    = var.gcp_project_id
   dataset_id = "mdm_audit_logs"
   location   = "EU"
