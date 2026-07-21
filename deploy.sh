@@ -77,27 +77,45 @@ else
   echo "Artifact Registry on jo olemassa."
 fi
 
-# 6. Build ja Deploy Cloud Runiin
+# 6. Kysytään APNs-määritykset
+echo ""
+echo "=== APNs määritykset ==="
+read -r -p "Syötä Apple Team ID (10 merkkiä): " team_id
+if [ -z "$team_id" ]; then
+  echo "Virhe: Team ID vaaditaan."
+  exit 1
+fi
+
+key_id="AU467BS82C"
+read -r -p "Syötä Apple Key ID (oletus: $key_id): " input_key_id
+if [ -n "$input_key_id" ]; then
+  key_id="$input_key_id"
+fi
+
+# Generoidaan satunnainen salainen avain Flask-sessiolle
+secret_key=$(python3 -c "import secrets; print(secrets.token_hex(24))")
+
+# 7. Build ja Deploy Cloud Runiin
 echo "Rakennetaan ja julkaistaan Cloud Run -palvelu..."
 gcloud run deploy "$SERVICE_NAME" \
   --source . \
   --region "$REGION" \
   --no-allow-unauthenticated \
   --set-secrets=APNS_PRIVATE_KEY=falko-apns-key:latest \
-  --set-env-vars=GCP_PROJECT="$PROJECT_ID" \
+  --set-env-vars=GCP_PROJECT="$PROJECT_ID",APNS_TEAM_ID="$team_id",APNS_KEY_ID="$key_id",SECRET_KEY="$secret_key" \
   --min-instances=0 \
   --max-instances=10 \
   --memory=512Mi \
   --cpu=1
 
-# 7. Aktivoidaan Google IAP ja domain-rajoitus
+# 8. Aktivoidaan Google IAP ja domain-rajoitus
 echo "Otetaan käyttöön Google IAP pääsy falko.fi-käyttäjille..."
 gcloud iap web add-iam-policy-binding \
   --resource-type=backend-services \
   --member="domain:falko.fi" \
   --role="roles/iap.httpsResourceAccessor" || echo "Huom: IAP-sidoksen asetus epäonnistui (vaatii mahdollisesti kuormantasaajan määrityksen)."
 
-# 8. Luodaan custom domain domain-mäppäys
+# 9. Luodaan custom domain domain-mäppäys
 echo "Luodaan domain-mäppäys: $DOMAIN_NAME -> Cloud Run..."
 if ! gcloud beta run domain-mappings list --region="$REGION" --format="value(domain)" | grep -q "$DOMAIN_NAME"; then
   gcloud beta run domain-mappings create \
