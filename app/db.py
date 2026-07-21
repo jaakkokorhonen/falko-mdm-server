@@ -110,7 +110,7 @@ def list_devices(
 
     docs = list(query.stream())
     devices = [{"udid": d.id, **d.to_dict()} for d in docs]
-    next_cursor = docs[-1].id if len(docs) == capped else None
+    next_cursor = docs[-1].id if docs and len(docs) == capped else None
     return devices, next_cursor
 
 

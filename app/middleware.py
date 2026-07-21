@@ -15,6 +15,7 @@ Rate limiting:
   Ref: OWASP API Security Top 10 (2023) API4:2023 Unrestricted Resource Consumption.
 """
 import time
+import random
 import threading
 import logging
 from collections import defaultdict, deque
@@ -48,6 +49,15 @@ def _is_rate_limited(ip: str) -> bool:
     """
     now = time.time()
     with _rate_lock:
+        # Satunnainen siivous (1 % pyynnöistä) estämään muistivuotoa (inactive IPs memory leak)
+        if random.random() < 0.01:
+            for k in list(_request_counts.keys()):
+                dq_clean = _request_counts[k]
+                while dq_clean and now - dq_clean[0] > _RATE_LIMIT_WINDOW:
+                    dq_clean.popleft()
+                if not dq_clean:
+                    _request_counts.pop(k, None)
+
         dq = _request_counts[ip]
         # Poista vanhat merkinnät ikkunan ulkopuolelta
         while dq and now - dq[0] > _RATE_LIMIT_WINDOW:
@@ -55,11 +65,6 @@ def _is_rate_limited(ip: str) -> bool:
         if len(dq) >= _RATE_LIMIT_REQUESTS:
             return True
         dq.append(now)
-        # Siivoa tyhjät IP-avaimet muistivuodon estämiseksi.
-        # defaultdict luo uuden deque:n jokaiselle IP:lle — ilman siivousta
-        # sanakirja kasvaa rajatta pitkässä tuotantoajossa.
-        if not dq:
-            del _request_counts[ip]
         return False
 
 
