@@ -1,7 +1,7 @@
 # Cloud Armor tietoturvakäytäntö (Security Policy) nopeusrajoituksille
 # Estää brute-force ja DDoS -hyökkäykset laitteiden checkin ja mdm reitteihin.
-# checkov:skip=CKV_GCP_73:Cloud Armor Log4j protection is not needed since the service runs in a python sandbox without Java log4j dependencies
 resource "google_compute_security_policy" "rate_limit_policy" {
+  # checkov:skip=CKV_GCP_73:Cloud Armor Log4j protection is not needed since the service runs in a python sandbox without Java log4j dependencies
   project     = var.gcp_project_id
   name        = "mdm-rate-limit-policy"
   description = "Nopeusrajoitukset (Rate Limiting) Falko MDM:n julkisille rajapinnoille"
