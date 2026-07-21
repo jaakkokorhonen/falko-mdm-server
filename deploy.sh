@@ -42,10 +42,28 @@ echo "Tarkistetaan Secret Manager..."
 if ! gcloud secrets list --format="value(name)" | grep -q "falko-apns-key"; then
   echo "Luodaan secret 'falko-apns-key'..."
   gcloud secrets create falko-apns-key --replication-policy="automatic"
-  echo "TÄRKEÄÄ: Muista lisätä APNs .p8-avain Secret Manageriin:"
-  echo "gcloud secrets versions add falko-apns-key --data-file=/path/to/AuthKey_XXX.p8"
+fi
+
+# Tarkistetaan onko salaisuudesta yhtään versiota ladattuna
+if ! gcloud secrets versions list falko-apns-key --limit=1 --format="value(name)" &>/dev/null; then
+  echo "HUOM: Secret Managerissa ei ole vielä ladattuja versioita avaimelle 'falko-apns-key'."
+  echo "Anna polku Apple APNs .p8 -yksityisavaintiedostoon lisätäksesi ensimmäisen version:"
+  read -r -p "Polku tiedostoon (esim. ~/Downloads/AuthKey_XXXXXX.p8): " key_path
+  # Korvataan ~ kotihakemistolla bash-yhteensopivasti
+  key_path="${key_path/#\~/$HOME}"
+  
+  if [ -f "$key_path" ]; then
+    gcloud secrets versions add falko-apns-key --data-file="$key_path"
+    echo "Avain lisätty Secret Manageriin."
+  else
+    echo "Virhe: Tiedostoa '$key_path' ei löydy."
+    echo "Deployment keskeytetty, koska Cloud Run vaatii Secret Managerissa olevan avaimen käynnistyäkseen."
+    echo "Lisää avain manuaalisesti ja aja skripti uudelleen:"
+    echo "gcloud secrets versions add falko-apns-key --data-file=/polku/AuthKey_XXX.p8"
+    exit 1
+  fi
 else
-  echo "Secret 'falko-apns-key' on jo olemassa."
+  echo "Secret 'falko-apns-key' ja sen vähintään yksi aktiivinen versio on olemassa."
 fi
 
 # 5. Luodaan Artifact Registry
