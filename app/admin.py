@@ -6,65 +6,113 @@ Endpointit:
   POST /admin/devices/<udid>/command     — lisää komento laitteen jonoon
   POST /admin/devices/<udid>/push        — lähetä APNs-herätys
 
-Autentikaatio:
-  Google Identity-Aware Proxy (IAP) tarkistaa käyttäjän Google Workspace
-  -tunnistuksen ennen kuin pyynnöt pääsevät tähän serviceen. IAP lisää
-  X-Goog-Authenticated-User-Email -otsakkeen jokaisen pyyntöön.
+Autentikaatio: Google Identity-Aware Proxy (IAP).
+  - Selain: IAP-cookie + X-Goog-IAP-JWT-Assertion
+  - Skriptit: Authorization: Bearer <ADMIN_TOKEN> (env-muuttuja ADMIN_TOKEN)
 
-  Tässä servicessä ei tarvita omaa kirjautumislogiikkaa — luottamus
-  on sidottu infrastruktuuriin, ei sovelluskoodiin. Ks. README:
-  Tietoturvaperiaate.
-
-TIETOTURVAHUOM: require_iap-dekoraattori tarkistaa otsakkeen muodon
-jälkikeen, mutta oikea suoja vaatii että Cloud Run on ei-julkinen
-ja liikenne kulkee IAP-suojatun Load Balancerin kautta.
+Security note: require_auth verifioi X-Goog-IAP-JWT-Assertion kryptografisesti
+google-auth-kirjastolla (id_token.verify_token). Pelkkä header-tarkistus ei riitä —
+kuka tahansa ennen IAP-kerrosta pääsevä voi spoofattaa X-Goog-Authenticated-User-Email.
+Ref: https://cloud.google.com/iap/docs/signed-headers-howto
 """
 import os
 import logging
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Blueprint, request, jsonify
+
+# google-auth validoi IAP JWT-assertion kryptografisesti Googlen julkisia avaimia vasten.
+# Tämä on pakollinen askel tuotannossa: ilman tätä verkkokerrokseen ennen Cloud Runia
+# pääsevä hyökkääjä voi spoofattaa X-Goog-Authenticated-User-Email -otsakkeen.
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
+
 from .db import list_devices, get_device, enqueue_command
 from .apns import send_push
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 logger = logging.getLogger(__name__)
 
+# IAP JWT-assertion verifiointiin tarvitaan audience-arvo, joka on
+# muotoa /projects/<project_number>/apps/<project_id>.
+# Aseta Cloud Runin ympäristömuuttujaan IAP_AUDIENCE.
+# Löydät arvon: gcloud iap web describe --resource-type=backend-services
+IAP_AUDIENCE = os.environ.get("IAP_AUDIENCE", "")
 
-def require_iap(f):
-    """Dekoraattori: varmistaa Google IAP -otsakkeen ja @falko.fi-osoitteen.
+# Fallback-token skriptikäyttöön (CI, curl-testit).
+# Jos ADMIN_TOKEN on asetettu, se hyväksytään IAP-tarkistuksen ohella.
+# NOTE: Aseta vahva (>= 32 merkkiä) satunnainen arvo, esim:
+#   openssl rand -base64 32 | gcloud secrets create falko-admin-token --data-file=-
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
-    IAP lisää jokaiseen pyyntyy otsakkeen muodossa:
-      X-Goog-Authenticated-User-Email: accounts.google.com:kayttaja@falko.fi
 
-    Tarkistaa:
-      1. Otsake on olemassa ja alkaa oikealla etuliitteellä.
-      2. Sähköpostiosoite päättyy @falko.fi:hin.
+def _verify_iap_jwt(iap_jwt: str) -> str | None:
+    """Verifioi Google IAP JWT-assertion ja palauttaa sähköpostin tai None.
 
-    TODO(jaakko): Lisää JWT-allekirjoituksen verifiointi
-    X-Goog-IAP-JWT-Assertion -otsakkeesta google-auth-kirjastolla
-    vahvemmaksi suojaksi suoran HTTP-pyyntöhuijauksen varalta.
+    Verifioi allekirjoituksen Googlen julkisilla avaimilla (ES256).
+    Palauttaa sähköpostin muodossa 'user@falko.fi',
+    tai None jos JWT on virheellinen tai vanhentunut.
+
+    Args:
+        iap_jwt: X-Goog-IAP-JWT-Assertion -otsakkeen arvo.
+
+    Returns:
+        Käyttäjän sähköpostiosoite tai None.
+    """
+    if not IAP_AUDIENCE:
+        # NOTE: IAP_AUDIENCE puuttuu — JWT-assertion verifiointia ei voida tehdä.
+        # Tuotannossa tämä on virheellinen tila; local-kehityksessä hyväksyttävä.
+        logger.warning("IAP_AUDIENCE ei ole asetettu — JWT-assertion verifiointia ei tehdä")
+        return None
+    try:
+        info = id_token.verify_token(
+            iap_jwt,
+            google_requests.Request(),
+            audience=IAP_AUDIENCE,
+            certs_url="https://www.gstatic.com/iap/verify/public_key",
+        )
+        # JWT:n email-kenttä on muotoa "user@falko.fi"
+        return info.get("email")
+    except Exception as exc:
+        logger.warning("IAP JWT-assertion verifiointi epäonnistui: %s", exc)
+        return None
+
+
+def require_auth(f):
+    """Dekoraattori: autentikoi pyyntö IAP JWT:llä tai ADMIN_TOKEN-fallbackilla.
+
+    Hyväksyntäjärjestys:
+      1. IAP: verifioi X-Goog-IAP-JWT-Assertion kryptografisesti, tarkista @falko.fi-domain
+      2. Bearer token: Authorization: Bearer <ADMIN_TOKEN> (skriptikäyttö)
+
+    Jos kumpikaan ei onnistu, palautetaan 401 tai 403.
     """
     @wraps(f)
     def decorated(*args, **kwargs):
-        user_header = request.headers.get("X-Goog-Authenticated-User-Email", "")
-        # IAP-otsakkeen muoto: "accounts.google.com:<email>"
-        # Puuttuva tai vääränmuotoinen otsake = pyynntö ei tullut IAP:n kautta
-        if not user_header or not user_header.startswith("accounts.google.com:"):
-            return jsonify({"error": "IAP-autentikointi puuttuu tai on virheellinen"}), 401
+        # --- Vaihtoehto 1: IAP JWT-assertion (selainpyynnöt) ---
+        iap_jwt = request.headers.get("X-Goog-IAP-JWT-Assertion", "")
+        if iap_jwt:
+            email = _verify_iap_jwt(iap_jwt)
+            if email is None:
+                return jsonify({"error": "IAP JWT-assertion verifiointi epäonnistui"}), 401
+            if not email.endswith("@falko.fi"):
+                return jsonify({"error": "Käyttöoikeus evätty (vain falko.fi-käyttäjille)"}), 403
+            return f(*args, **kwargs)
 
-        email = user_header.split("accounts.google.com:")[1]
-        # Rajoitetaan pääsy vain @falko.fi Workspace-domainille.
-        # IAP:n IAM-säännöllä pitäisi jo hoitua, mutta tämä on toinen puolustuslinja.
-        if not email.endswith("@falko.fi"):
-            return jsonify({"error": "Käyttöoikeus evätty (vain falko.fi-käyttäjille)"}), 403
+        # --- Vaihtoehto 2: Bearer-token fallback (skriptit, CI) ---
+        # NOTE: ADMIN_TOKEN on oltava asetettu; tyhjä arvo hylätään aina.
+        auth_header = request.headers.get("Authorization", "")
+        if ADMIN_TOKEN and auth_header == f"Bearer {ADMIN_TOKEN}":
+            return f(*args, **kwargs)
 
-        return f(*args, **kwargs)
+        # Kumpaakaan hyväksyttyä autentikaatiotapaa ei löydy.
+        return jsonify({"error": "Autentikaatio puuttuu tai on virheellinen"}), 401
+
     return decorated
 
 
 @admin_bp.get("/devices")
-@require_iap
+@require_auth
 def list_all_devices():
     """Listaa kaikki rekisteröidyt laitteet.
 
@@ -76,7 +124,7 @@ def list_all_devices():
 
 
 @admin_bp.get("/devices/<udid>")
-@require_iap
+@require_auth
 def get_one_device(udid: str):
     """Palauttaa yksittäisen laitteen tiedot.
 
@@ -93,7 +141,7 @@ def get_one_device(udid: str):
 
 
 @admin_bp.post("/devices/<udid>/command")
-@require_iap
+@require_auth
 def send_command(udid: str):
     """Lisää MDM-komennon laitteen jonoon.
 
@@ -135,7 +183,7 @@ def send_command(udid: str):
         "command_type": command_type,
         "payload": body.get("payload", {}),
         "status": "pending",
-        # ISO 8601 UTC -aikaleima järjestystä varten dequeue_command-kyselymssä
+        # ISO 8601 UTC -aikaleima järjestystä varten dequeue_command-kyselyssä
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     enqueue_command(udid, cmd)
@@ -145,7 +193,7 @@ def send_command(udid: str):
 
 
 @admin_bp.post("/devices/<udid>/push")
-@require_iap
+@require_auth
 def trigger_push(udid: str):
     """Lähettää APNs-herätyksen laitteelle.
 
@@ -158,10 +206,10 @@ def trigger_push(udid: str):
         udid: Laite jolle herätys lähetetään.
 
     Returns:
-        200 { status: "push sent" } jos APNs hyväksyi pyyntön.
+        200 { status: "push sent" } jos APNs hyväksyi pyynnön.
         400 jos laitteen APNs-tiedot puuttuvat.
         404 jos laitetta ei löydy.
-        502 jos APNs hylkäsi pyyntön.
+        502 jos APNs hylkäsi pyynnön.
     """
     device = get_device(udid)
     if not device:

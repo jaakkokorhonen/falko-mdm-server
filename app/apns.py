@@ -23,26 +23,32 @@ logger = logging.getLogger(__name__)
 APNS_HOST_PROD    = "https://api.push.apple.com"
 APNS_HOST_SANDBOX = "https://api.sandbox.push.apple.com"
 
+# APNs JWT-token on voimassa 60 minuuttia (Apple-raja).
+# Uudistetaan 10 min ennen vanhenemista puskurin varmistamiseksi.
+# NOTE: Apple rajoittaa JWT-tokenin uusimistiheyttä — älä lyhennä tätä arvoa.
+_TOKEN_TTL_SECONDS = 50 * 60  # 50 min, 10 min marginaali ennen Apple-rajaa
+
 # Moduulitason token-cache: (token_string, luontiaika_unix)
-# Apple rajoittaa JWT-tokenin uusimistiheyttä — sama token kelpää 60 min.
-# Älä muuta 3000 sekunnin raja-arvoa ilman hyvää syytä.
+# Välttää turhan ES256-allekirjoitusoperaation jokaisella push-pyynnöllä ja
+# estää APNs-puolen rate limiting -ongelman tiheässä push-liikenteessä.
+# FIXME: Tämä ei ole thread-safe. Jos Flask pyörii monisäikeisesti (threaded=True
+# tai gunicorn workers), lisää threading.Lock() tokenin uusimiseen.
 _apns_token_cache: tuple[str, float] | None = None
 
 
 def _get_apns_token() -> str:
     """Palauttaa voimassa olevan APNs JWT-tokenin, generoi tarvittaessa.
 
-    Cachetää tokenin 50 minuutiksi (3000 s) Apple-rajoitusten takia.
-    Token on voimassa 60 minuuttia, mutta uusitaan 10 min ennen vanhenemista
-    puskurin varmistamiseksi.
+    Cachetää tokenin _TOKEN_TTL_SECONDS ajaksi Apple-rajoitusten takia.
+    Token on voimassa 60 minuuttia, mutta uusitaan 10 min ennen vanhenemista.
 
     Returns:
         JWT-token string APNs-pyyntöjä varten.
     """
     global _apns_token_cache
     now = time.time()
-    # Käytä cachettua tokenia jos se on alle 50 minuuttia vanha
-    if _apns_token_cache and now - _apns_token_cache[1] < 3000:
+    # Käytä cachetttua tokenia jos se on alle TTL vanha
+    if _apns_token_cache and now - _apns_token_cache[1] < _TOKEN_TTL_SECONDS:
         return _apns_token_cache[0]
 
     team_id     = os.environ["APNS_TEAM_ID"]
@@ -62,6 +68,7 @@ def _get_apns_token() -> str:
         headers={"kid": key_id},
     )
     _apns_token_cache = (token, now)
+    logger.debug("APNs JWT-token uudistettu")
     return token
 
 

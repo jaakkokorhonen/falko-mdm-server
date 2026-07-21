@@ -2,9 +2,10 @@
 
 Laite lähettää PUT /mdm -pyyntön jokaisella MDM-pollilla tai
 APNs-herätysviestin jälkeen. Endpoint:
-  1. Kuitataan edellinen komento (jos Status lähetettiin)
-  2. Päivitetään last_seen
-  3. Palautetaan seuraava komento jonosta (tai tyhjä 200)
+  1. Validoi UDID-formaatti
+  2. Kuittaa edellinen komento (jos Status lähetettiin)
+  3. Päivittää last_seen
+  4. Palauttaa seuraavan komennon jonosta (tai tyhjän 200)
 
 Apple MDM Protocol Reference:
   https://developer.apple.com/documentation/devicemanagement/implementing-the-simple-mdm-protocol
@@ -12,9 +13,11 @@ Apple MDM Protocol Reference:
 Huom: Tämä endpoint EI vaadi IAP-autentikaatiota — kutsuja on Apple-laite,
 ei ihmiskäyttäjä. Laitteen identiteetti perustuu TLS-sertifikaattiin
 (MDM Identity Certificate, sisältyy mobileconfig-profiiliin).
+
+Security note: UDID validoidaan ennen Firestore-kirjoitusta. Ref: Fleet MDM CVE-2026-34385.
 """
+import re
 import logging
-import uuid
 from datetime import datetime, timezone
 from flask import Blueprint, request, Response
 from plistlib import loads as plist_loads, dumps as plist_dumps, FMT_XML
@@ -22,6 +25,10 @@ from .db import upsert_device, dequeue_command, ack_command
 
 mdm_bp = Blueprint("mdm", __name__)
 logger = logging.getLogger(__name__)
+
+# Sama validaatio kuin checkin.py:ssä: hylätään virheelliset UDIDit
+# ennen Firestore-kirjoitusta.
+_UDID_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{18,38}[A-Z0-9]$")
 
 
 def _build_command_plist(command_type: str, cmd_uuid: str, payload: dict | None = None) -> bytes:
@@ -37,7 +44,7 @@ def _build_command_plist(command_type: str, cmd_uuid: str, payload: dict | None 
     Args:
         command_type: Apple MDM RequestType, esim. "DeviceLock".
         cmd_uuid:     Komennon uniikki tunniste (Firestore-dokumentti-ID).
-        payload:      Lisaparametrit komennolle (esim. PIN DeviceLockille).
+        payload:      Lisäparametrit komennolle (esim. PIN DeviceLockille).
                       Sulautetaan Command-dictiin suoraan.
 
     Returns:
@@ -67,7 +74,7 @@ def mdm():
     Returns:
         200 + komento XML plistinä jos jono ei ole tyhjä.
         200 tyhjällä vastauksella jos jono on tyhjä (Apple-spesifikaatio).
-        400 jos plist-jäsennys epäonnistuu.
+        400 jos plist-jäsennys epäonnistuu tai UDID on virheellinen.
     """
     try:
         data = plist_loads(request.data, fmt=FMT_XML)
@@ -75,7 +82,12 @@ def mdm():
         logger.warning("MDM: plist-jäsennys epäonnistui: %s", exc)
         return Response("", status=400)
 
-    udid     = data.get("UDID", "unknown")
+    # UDID-validointi: hylätään puuttuvat tai epämuodostuneet UDIDit
+    udid = data.get("UDID", "")
+    if not udid or not _UDID_RE.match(udid):
+        logger.warning("MDM: virheellinen tai puuttuva UDID: %r", udid[:40] if udid else "")
+        return Response("", status=400)
+
     status   = data.get("Status", "")
     cmd_uuid = data.get("CommandUUID", "")
 
@@ -93,7 +105,7 @@ def mdm():
         # NotNow = laite ei juuri nyt pysty (esim. käyttäjä kirjautunut ulos).
         # Kuitataan sent-tilaan, ei yritetä automaattisesti uudelleen.
         # TODO(jaakko): Lisää NotNow-retry-logiikka — komento pitäisi
-        # palauttaa takaisin "pending"-tilaan uudelleenyritystenä.
+        # palauttaa takaisin "pending"-tilaan uudelleenyrityksenä.
         ack_command(udid, cmd_uuid, status.lower())
 
     # Haetaan seuraava komento jonosta
@@ -102,7 +114,7 @@ def mdm():
         # Tyhjä 200 = Apple-spesifikaation mukainen "ei komentoja" -vastaus
         return Response("", status=200)
 
-    # Merkitaan komento lähetetyksi ennen vastauksen palautusta
+    # Merkitään komento lähetetyksi ennen vastauksen palautusta
     ack_command(udid, cmd_id, "sent")
 
     command_type = cmd.get("command_type", "DeviceInformation")
