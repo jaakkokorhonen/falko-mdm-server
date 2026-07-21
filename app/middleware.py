@@ -50,7 +50,7 @@ def _is_rate_limited(ip: str) -> bool:
     now = time.time()
     with _rate_lock:
         # Satunnainen siivous (1 % pyynnöistä) estämään muistivuotoa (inactive IPs memory leak)
-        if random.random() < 0.01:
+        if random.random() < 0.01:  # nosec B311
             for k in list(_request_counts.keys()):
                 dq_clean = _request_counts[k]
                 while dq_clean and now - dq_clean[0] > _RATE_LIMIT_WINDOW:

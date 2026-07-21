@@ -60,4 +60,4 @@ if __name__ == "__main__":
     # Paikallinen ajo kehityskäyttöön. Tuotannossa Gunicorn käynnistää suoraan
     # 'app'-objektin (ks. Dockerfile CMD).
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)  # nosec B104
