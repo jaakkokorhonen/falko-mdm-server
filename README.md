@@ -7,14 +7,17 @@ Toimii yhdessä [falko-device-onboarding](https://github.com/jaakkokorhonen/falk
 
 ---
 
-## Tietoturvaperiaate: IAP rajaa luottamuksen Cloud Runiin
+## Tietoturvaperiaate: IAP ja OIDC
 
-Tämä palvelin pyörii Cloud Runilla ja käyttää Firestorea. Molemmat ovat jo Googlen luottamuspiirissä. Kun admin-rajapinta suojataan **Identity-Aware Proxy (IAP)** -tasolla, luottamusta ei tarvitse jakaa eikä laajentaa:
+Tämä palvelin pyörii Cloud Runilla ja käyttää Firestorea. Molemmat ovat jo Googlen luottamuspiirissä. Admin-rajapinta on suojattu **Identity-Aware Proxy (IAP)** -tasolla, mikä korvaa perinteisen token-pohjaisen tunnistautumisen Google Workspace OIDC -istunnoilla:
 
-- Pyyntö ei koskaan saavuta Flask-sovellusta jos käyttäjä ei ole autentikoitu — autentikaatio tapahtuu Googlen verkkokerroksessa ennen Cloud Runia.
-- Workspace-domainirajaus (`domain:falko.fi`) on yksi IAM-sääntö, ei sovelluskoodi. Buginen tai puuttuva `@require_login`-decorator ei voi jättää aukkoa.
-- Staattinen `ADMIN_TOKEN` on jaettu salaisuus jonka vuotaminen avaa koko admin-rajapinnan. IAP korvaa sen Googlen allekirjoittamalla per-pyyntö-identiteetillä (`X-Goog-Authenticated-User-Email`).
-- Hyökkäyspinta pysyy samana kuin ilman UI:ta — IAP ei lisää uusia luottamussuhteita, se ainoastaan rajaa pääsyn olemassaolevaan.
+- **OIDC käyttöliittymässä (UI):** Käyttöliittymässä ei tarvitse olla omaa kirjautumistoiminnallisuutta tai kirjastoa. Kun käyttäjä menee selaimella admin-UI-osoitteeseen, Google IAP sieppaa pyynnön verkkokerroksessa ja ohjaa kirjautumattoman käyttäjän Googlen Workspace OIDC -kirjautumissivulle.
+- **Istunnon välitys (Cookies):** Onnistuneen kirjautumisen jälkeen selain saa Googlen istuntoevästeen. Kaikki käyttöliittymästä palvelimelle tehtävät API-pyynnöt kulkevat `credentials: 'include'` -asetuksella, jolloin selain liittää evästeen pyyntöihin automaattisesti.
+- **Identiteetin välitys palvelimelle (Headers):** IAP tarkistaa pyynnöt verkkokerroksessa, riisuu arkaluontoiset evästeet ja välittää pyynnön Flask-sovellukselle lisäten luotetut otsakkeet:
+  * `X-Goog-Authenticated-User-Email` — käyttäjän sähköpostiosoite (muodossa `accounts.google.com:jaakko@falko.fi`).
+  * `X-Goog-Authenticated-User-Id` — uniikki käyttäjä-ID.
+  * `X-Goog-IAP-JWT-Assertion` — Googlen allekirjoittama kryptografinen JWT-varmenne.
+- **Domain-rajoitus:** Flask-palvelin (`app/admin.py`) lukee sähköpostin otsakkeesta ja varmistaa, että sen loppuosa on `@falko.fi`. Muut pyynnöt hylätään automaattisesti.
 
 > **Periaate:** Kun infrastruktuuri on jo GCP:ssä, autentikaatio kuuluu infrastruktuuriin — ei sovelluskoodiin.
 
@@ -30,18 +33,6 @@ gcloud iap web add-iam-policy-binding \
   --member="domain:falko.fi" \
   --role="roles/iap.httpsResourceAccessor"
 ```
-
-IAP:n aktivoinnin jälkeen Flask lukee kirjautuneen käyttäjän suoraan otsakeesta:
-
-```python
-# app/admin.py — korvaa require_token-decoratorin
-user_email = request.headers.get("X-Goog-Authenticated-User-Email", "")
-# Muoto: "accounts.google.com:jaakko@falko.fi"
-```
-
-> **Huom:** `ADMIN_TOKEN`-ympäristömuuttuja jää fallback-mekanismiksi API-kutsuihin
-> (esim. CI/CD-pipeline, `curl`-testaus) joissa selainkäyttäjän OAuth-flow ei ole käytännöllinen.
-> Tuotannossa admin-UI kulkee aina IAP:n kautta.
 
 ---
 
@@ -71,12 +62,12 @@ Google IAP ──► Cloud Run ──► Firestore
 | Muuttuja | Pakollinen | Kuvaus |
 |---|---|---|
 | `GCP_PROJECT` | Kyllä | GCP-projektin tunnus |
-| `ADMIN_TOKEN` | Fallback | Bearer-token skripti/CI-käyttöön. IAP-aktivoinnin jälkeen admin-UI ei tarvitse tätä. |
 | `SECRET_KEY` | Kyllä | Flaskin session-salaisuus |
 | `APNS_TEAM_ID` | APNs-pushin | Apple Developer Team ID |
 | `APNS_KEY_ID` | APNs-pushin | APNs-avaimen Key ID |
 | `APNS_PRIVATE_KEY` | APNs-pushin | APNs .p8-avain PEM-muodossa (rivinvaihto `\n`) |
 | `APNS_SANDBOX` | Ei | `true` = sandbox-APNs (kehitys) |
+
 
 Aseta Cloud Runiin:
 ```bash
