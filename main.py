@@ -38,7 +38,13 @@ def create_app() -> Flask:
     app = Flask(__name__)
     CORS(
         app,
-        resources={r"/admin/*": {"origins": ["https://mdm.falko.fi", "https://falko-mdm.web.app"]}},
+        resources={r"/admin/*": {"origins": [
+            "https://mdm.falko.fi",
+            "https://qa.mdm.falko.fi",
+            r"https://.*\.web\.app",
+            r"https://.*\.firebaseapp\.com",
+            r"http://localhost:\d+"
+        ]}},
         supports_credentials=True
     )
     # SECRET_KEY vaaditaan Flaskin sessioille. MDM-protokolla ei käytä sessioita,
