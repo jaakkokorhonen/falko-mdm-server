@@ -33,6 +33,7 @@ falko-mdm-server/
 
 ### Periaatteet
 
+- **Infrastructure as Code (IaC) Ensin:** Kaikki pilviresurssit (Cloud Run, Firestore, Secret Manager, IAM, Monitoring, DNS) hallitaan **yksinomaan Terraformilla** (`terraform/`-kansio). Mitään GCP-resursseja ei luoda tai muokata manuaalisesti Google Cloud Consolesta tai gcloud-CLI-komennoilla tuotanto/staging-ympäristöissä.
 - **Yksi tiedosto = yksi vastuu.** `db.py` koskee vain Firestore-operaatioita,
   `apns.py` vain APNs-yhteyttä jne. Älä lisää liiketoimintalogiikkaa `db.py`:hyn
   tai tietokantakutsuja `admin.py`:hyn.
@@ -127,6 +128,21 @@ Käytä standardimuotoa niin että ne löytyvät hakemalla:
 # FIXME: APNs-token cachetetaan modulitasolla mutta ei ole thread-safe
 # NOTE: Apple rajoittaa JWT-tokenin uusimistiheyttä — älä muuta 50 min -raja-arvoa
 ```
+
+---
+
+## Infrastruktuuri ja Terraform (IaC First)
+
+Tässä repositoriossa noudatetaan tiukkaa **"IaC First"** -periaatetta:
+
+1. **Infrastruktuuri kuuluu koodiin (`terraform/`):**
+   - Jos uusi ominaisuus vaatii GCP-resurssin, ympäristömuuttujan, IAM-oikeuden, Secret Manager -salaisuuden, Cloud Run -muutoksen tai lokitus/hälytyssäännön, se **määritellään aina `terraform/`-kansion `.tf`-tiedostoihin**.
+   - Älä dokumentoi teknisiin ohjeisiin manuaalisia `gcloud ...` -komentoja resursseille — kirjoita vastaava `resource "google_..."` Terraformiin ja määrittele muuttujat `variables.tf`:ssä.
+
+2. **Terraform-koodin laatuvaatimukset:**
+   - Kaikilla resurssilohkoilla tulee olla selventävä kommentti (*miksi* resurssi on olemassa ja *mikä* sen tietoturvavaikutus on).
+   - Suorita `terraform fmt` ennen jokaista committia.
+   - Varmista `checkov -d terraform/` -tietoturvaskannauksen läpäisy.
 
 ---
 
