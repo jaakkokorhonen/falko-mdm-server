@@ -6,11 +6,14 @@ Rekisteröi Blueprintit:
   - admin_bp    → /admin/*        (Admin API, IAP-suojattu)
 
 Cloud Runissa käynnistys tapahtuu Gunicornin kautta (Dockerfile).
-Paikallinen ajo: python main.py
+Paikallinen ajo: LOCAL_DEV=1 python main.py
 
 Parannus (2026-07): middleware (security headers, rate limiting) rekisteröity.
+Korjaus (2026-07): SECRET_KEY-fallback poistettu (SEC-15).
+Korjaus (2026-07): LOCAL_DEV-fallback käyttää secrets.token_urlsafe(48) (SEC-15 jätko).
 """
 import os
+import secrets
 import logging
 from flask import Flask
 from flask_cors import CORS
@@ -34,6 +37,9 @@ def create_app() -> Flask:
 
     Returns:
         Konfiguroitu Flask-instanssi.
+
+    Raises:
+        ValueError: Jos SECRET_KEY-ympäristömuuttuja puuttuu tuotantoympäristössä.
     """
     app = Flask(__name__)
     CORS(
@@ -47,10 +53,34 @@ def create_app() -> Flask:
         ]}},
         supports_credentials=True
     )
-    # SECRET_KEY vaaditaan Flaskin sessioille. MDM-protokolla ei käytä sessioita,
-    # mutta Flask vaatii arvon — tuotannossa aseta vahva satunnainen arvo:
-    #   openssl rand -base64 32 | gcloud secrets create falko-secret-key --data-file=-
-    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-me")
+
+    # SEC-15: SECRET_KEY ei saa olla kovakoodattu fallback-arvo.
+    # Paikallisessa kehityksessä (LOCAL_DEV=1) sallitaan heikko avain —
+    # tuotannossa Cloud Run -ympäristömuuttuja on pakollinen.
+    # Generoi vahva avain: openssl rand -base64 32
+    # Tallenna: gcloud secrets create falko-secret-key --data-file=-
+    #
+    # SEC-15 jätko: käytetään secrets.token_urlsafe(48) staattisen
+    # 'local-dev-only-...' -merkkijonon sijaan. Syä:
+    #   1. Staattinen vakio voi vahingossa committautua .env-tiedostoon.
+    #   2. Staattinen vakio voi päätyä loggeihin tai virheilmoituksiin.
+    #   3. secrets.token_urlsafe(48) tuottaa 64-merkkisen kryptografisesti
+    #      vahvan avaimen joka restartin yhteydessä — hyväksyttävää
+    #      LOCAL_DEV-ympäristössä jossa sessioiden jatkuvuus ei ole vaatimus.
+    _secret_key = os.environ.get("SECRET_KEY", "")
+    if not _secret_key:
+        if os.environ.get("LOCAL_DEV") == "1":
+            _secret_key = secrets.token_urlsafe(48)
+            logging.getLogger(__name__).warning(
+                "SECRET_KEY puuttuu — generoidaan väliaikainen kehitysavain (LOCAL_DEV=1). "
+                "Avain vaihtuu restartin yhteydessä. ÄLÄ käytä tuotannossa."
+            )
+        else:
+            raise ValueError(
+                "SECRET_KEY-ympäristömuuttuja on pakollinen tuotannossa. "
+                "Aseta se Cloud Run -salaisuutena tai ympäristömuuttujana."
+            )
+    app.config["SECRET_KEY"] = _secret_key
 
     app.register_blueprint(mdm_bp)
     app.register_blueprint(checkin_bp)
@@ -69,7 +99,7 @@ def create_app() -> Flask:
 app = create_app()
 
 if __name__ == "__main__":
-    # Paikallinen ajo kehityskäyttöön. Tuotannossa Gunicorn käynnistää suoraan
+    # Paikallinen ajo kehitystkäyttöön. Tuotannossa Gunicorn käynnistää suoraan
     # 'app'-objektin (ks. Dockerfile CMD).
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)  # nosec B104

@@ -9,7 +9,14 @@ Endpointit:
   POST /admin/users/<email>/authorize        — hyväksy käyttäjän pääsypyyntö
   POST /admin/users/<email>/deny             — evää käyttäjän pääsypyyntö
 
-Autentikaatio:
+Autentikaatiotasot:
+  @require_auth  — Kaikki hyväksytyt käyttäjät (status=authorized, role=user tai admin).
+                   Käytetään: device-listaus, laitetiedot, komennon lähetys, APNs-push.
+                   HUOM: EraseDevice ja ShutDownDevice vaativat admin-roolin (ks. alla).
+  @require_admin — Vain admin-roolin käyttäjät (status=authorized, role=admin).
+                   Käytetään: käyttäjähallinta (/users/*) ja DANGER-komennot.
+
+Autentikaatiotapa:
   - Google OAuth ID Token: Authorization: Bearer <google_id_token>
   - IAP: X-Goog-IAP-JWT-Assertion
   Kaikki Google OAuth -käyttäjät tarkistetaan Firestoren users-kokoelmasta (OIDC SSO luvitus).
@@ -19,9 +26,13 @@ google-auth-kirjastolla (id_token.verify_token). Pelkkä header-tarkistus ei rii
 kuka tahansa ennen IAP-kerrosta pääsevä voi spoofattaa X-Goog-Authenticated-User-Email.
 Ref: https://cloud.google.com/iap/docs/signed-headers-howto
 
-Parannus (2026-07): list_devices tukee sivutusta, command_type validoitu
-  sallittujen arvojen listaa vasten (allowlist), structured logging.
-  Ref: OWASP API Security Top 10 (2023) API3:2023 Broken Object Property Level Authorization.
+Korjaukset (2026-07):
+  - SEC-10: Bootstrap admin siirretty BOOTSTRAP_ADMIN_EMAIL-ympäristömuuttujaan.
+  - SEC-11: require_admin-dekoraattori — roolitarkistus /users-endpointille ja
+    DANGER-komennoille (EraseDevice, ShutDownDevice, DeviceLock).
+  - SEC-20 (apns.py): APNs-avain Secret Managerista.
+  - Review-korjaukset: bootstrap-virheenkäsittely, auth-semantiikka, DANGER-rajaus.
+  Ref: OWASP API Security Top 10 (2023) API3:2023, API5:2023.
 """
 import os
 import logging
@@ -39,11 +50,14 @@ from .db import (
 )
 from .apns import send_push
 
-# Suorat pääsyoikeudet email-osoitteen perusteella (bootstrap admin).
-# Nämä käyttäjät saavat pääsyn automaattisesti ilman Firestore-tarkistusta.
-_BOOTSTRAP_ADMINS: frozenset[str] = frozenset({
-    "jaakko.korhonen@gmail.com",
-})
+# SEC-10: Bootstrap admin luetaan ympäristömuuttujasta kovakoodatun sähköpostin sijaan.
+# Aseta Cloud Run -ympäristömuuttuja BOOTSTRAP_ADMIN_EMAIL tai tallenna
+# Secret Manageriin ja mount Cloud Runin env:iin.
+# Tyhjä arvo tarkoittaa: ei bootstrap-adminia (täysi Firestore-tarkistus kaikille).
+_bootstrap_admin_email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+_BOOTSTRAP_ADMINS: frozenset[str] = (
+    frozenset({_bootstrap_admin_email}) if _bootstrap_admin_email else frozenset()
+)
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 logger = logging.getLogger(__name__)
@@ -68,6 +82,15 @@ _ALLOWED_COMMANDS: frozenset[str] = frozenset({
     "DisableRemoteDesktop",
     "ScheduleOSUpdate",
     "ActiveNSExtensions",  # Listaa aktiiviset Network Extensions (VPN, DNS proxy jne.)
+})
+
+# Komennot jotka vaativat admin-roolin (require_admin) eikä pelkkää
+# authorized-statusta (require_auth). Peruuttamattomat tai korkean riskin komennot.
+# Ref: OWASP API5:2023 Broken Function Level Authorization.
+_DANGER_COMMANDS: frozenset[str] = frozenset({
+    "EraseDevice",      # Pyyhkii kaiken laitteen datan — peruuttamaton
+    "ShutDownDevice",   # Sammuttaa laitteen — vaatii fyysistä toimenpidettä
+    "DeviceLock",       # Voi lukita laitteen PIN-koodilla jota ei tiedetä
 })
 
 
@@ -123,7 +146,7 @@ def _check_user_access(email: str) -> tuple[bool, str, int]:
         (allowed, reason, http_status): Sallitaanko pääsy, virheviesti ja HTTP-koodi.
     """
     # Bootstrap-admineilla ehdoton pääsy ilman DB-tarkistusta
-    if email in _BOOTSTRAP_ADMINS:
+    if email.lower() in _BOOTSTRAP_ADMINS:
         # Varmistetaan silti että admin-tietue on kannassa (ensimmäinen kirjautuminen)
         upsert_user(email, role="admin", status="authorized")
         return True, "", 200
@@ -139,8 +162,42 @@ def _check_user_access(email: str) -> tuple[bool, str, int]:
     return False, "Käyttöoikeutesi on vielä käsittelyssä. Odota ylläpitäjän hyväksyntää.", 403
 
 
+def _get_authenticated_email() -> tuple[str | None, str]:
+    """Palauttaa autentikoituneen käyttäjän sähköpostin ja autentikointitavan.
+
+    Kokeilee järjestyksessä: IAP JWT → Bearer Google OAuth Token.
+
+    Returns:
+        (email, method) jossa method on 'iap', 'bearer' tai 'none'.
+        Email on None jos autentikointi epäonnistuu tai headeria ei löydy.
+    """
+    iap_jwt = request.headers.get("X-Goog-IAP-JWT-Assertion", "")
+    if iap_jwt:
+        # IAP JWT löytyi — verifioi kryptografisesti
+        email = _verify_iap_jwt(iap_jwt)
+        if email is None:
+            # JWT löytyi mutta verifiointi epäonnistui — tämä on eri tilanne
+            # kuin "ei headeria" — logitetaan jo _verify_iap_jwt:ssä
+            logger.warning("IAP JWT-assertion hylätty — palautetaan None")
+        return email, "iap"
+
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        email = _verify_google_oauth_token(token)
+        return email, "bearer"
+
+    return None, "none"
+
+
 def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
-    """Dekoraattori: autentikoi pyyntö IAP JWT:llä tai Google OAuth ID Tokenilla.
+    """Dekoraattori: autentikoi pyyntö ja tarkistaa pääsyoikeuden.
+
+    Hyväksyy kaikki authorized-statuksen käyttäjät riippumatta roolista
+    (role=user tai role=admin). Tämä on tarkoituksellinen valinta:
+    kaikki hyväksytyt MDM-ylläpitäjät voivat listata laitteita ja
+    lähettää useimpia komentoja. Vain DANGER_COMMANDS vaativat admin-roolin
+    (tarkistetaan send_command-endpointissa erikseen).
 
     Hyväksyntäjärjestys:
       1. IAP: verifioi X-Goog-IAP-JWT-Assertion kryptografisesti.
@@ -149,42 +206,65 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
 
     Jos autentikointi ei onnistu, palautetaan 401. Jos käyttäjä on tunnettu
     mutta ei vielä hyväksytty, palautetaan 403 + kuvaus.
-
-    Args:
-        f: Suojattava reittifunktio.
-
-    Returns:
-        Suojattu reittifunktio.
     """
     @wraps(f)
     def decorated(*args: Any, **kwargs: Any) -> Any:
-        # --- Vaihtoehto 1: IAP JWT-assertion (Load Balancer + IAP) ---
-        iap_jwt = request.headers.get("X-Goog-IAP-JWT-Assertion", "")
-        if iap_jwt:
-            email = _verify_iap_jwt(iap_jwt)
-            if email is None:
-                return jsonify({"error": "IAP JWT-assertion verifiointi epäonnistui"}), 401
-            allowed, reason, code = _check_user_access(email)
-            if not allowed:
-                return jsonify({"error": reason}), code
+        email, method = _get_authenticated_email()
+        if not email:
+            logger.warning(
+                "Autentikaatio epäonnistui: method=%s path=%s",
+                method, request.path
+            )
+            return jsonify({"error": "Autentikaatio puuttuu tai on virheellinen"}), 401
+
+        allowed, reason, code = _check_user_access(email)
+        if not allowed:
+            return jsonify({"error": reason}), code
+
+        return f(*args, **kwargs)
+    return decorated
+
+
+def require_admin(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Dekoraattori: autentikoi pyyntö ja vaatii admin-roolin.
+
+    SEC-11: /admin/users ja käyttäjähallintaendpointit vaativat admin-roolin.
+    authorized-statuksen käyttäjä (role=user) ei pääse näihin endpointteihin.
+    Ref: OWASP API5:2023 Broken Function Level Authorization.
+    """
+    @wraps(f)
+    def decorated(*args: Any, **kwargs: Any) -> Any:
+        email, method = _get_authenticated_email()
+        if not email:
+            logger.warning(
+                "Admin-autentikaatio epäonnistui: method=%s path=%s",
+                method, request.path
+            )
+            return jsonify({"error": "Autentikaatio puuttuu tai on virheellinen"}), 401
+
+        # Bootstrap-adminit ohittavat DB-tarkistuksen
+        if email.lower() in _BOOTSTRAP_ADMINS:
+            try:
+                upsert_user(email, role="admin", status="authorized")
+            except Exception as exc:
+                # upsert epäonnistui (esim. Firestore poissa) — kirjataan mutta
+                # ei estetä pääsyä: bootstrap-admin on oikeusperusta joka on
+                # vahvistettu ympäristömuuttujalla, ei DB:llä.
+                logger.error(
+                    "Bootstrap-admin upsert epäonnistui (%s) — pääsy sallitaan silti: %s",
+                    email, exc
+                )
             return f(*args, **kwargs)
 
-        # --- Vaihtoehto 2: Authorization Header (Google OAuth ID Token) ---
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header.split(" ")[1]
+        user = get_user(email)
+        if not user:
+            return jsonify({"error": "Käyttäjää ei löydy"}), 401
+        if user.get("status") != "authorized":
+            return jsonify({"error": "Pääsy evätty"}), 403
+        if user.get("role") != "admin":
+            return jsonify({"error": "Tämä toiminto vaatii admin-oikeudet"}), 403
 
-            # Google OAuth ID Token — verifioi + tarkista luvitusstatus
-            email = _verify_google_oauth_token(token)
-            if email:
-                allowed, reason, code = _check_user_access(email)
-                if not allowed:
-                    return jsonify({"error": reason}), code
-                return f(*args, **kwargs)
-
-        # Kumpaakaan hyväksyttyä autentikaatiotapaa ei löydy.
-        return jsonify({"error": "Autentikaatio puuttuu tai on virheellinen"}), 401
-
+        return f(*args, **kwargs)
     return decorated
 
 
@@ -242,6 +322,11 @@ def send_command(udid: str) -> Response:
     Laite hakee komennon seuraavalla MDM-pollilla tai APNs-herätyksen
     jälkeen. Komento ei siis toteudu välittömästi.
 
+    DANGER-komennot (EraseDevice, ShutDownDevice, DeviceLock) vaativat
+    admin-roolin — pelkkä authorized-status ei riitä. Tämä on server-puolen
+    enforcement UI:n vahvistusmodaalin lisäksi.
+    Ref: OWASP API5:2023, _DANGER_COMMANDS.
+
     Body (JSON)::
 
         {
@@ -249,16 +334,15 @@ def send_command(udid: str) -> Response:
           "payload": {}
         }
 
-    Sallitut command_type-arvot: DeviceInformation, DeviceLock, EraseDevice,
-    InstallApplication, RestartDevice, ShutDownDevice, EnableRemoteDesktop,
-    DisableRemoteDesktop, ScheduleOSUpdate, ActiveNSExtensions.
+    Sallitut command_type-arvot: ks. _ALLOWED_COMMANDS.
+    Admin-roolia vaativat: ks. _DANGER_COMMANDS.
 
     Args:
         udid: Laitteen Apple-tunniste URL-polusta.
 
     Returns:
         Response: 202 Accepted { status: "queued", command_type } jos onnistui,
-        tai virhe ja 400/404.
+        tai virhe ja 400/403/404.
     """
     body = request.get_json(silent=True) or {}
     command_type = body.get("command_type")
@@ -275,6 +359,29 @@ def send_command(udid: str) -> Response:
             "error": f"Tuntematon command_type: {command_type!r}",
             "allowed": sorted(_ALLOWED_COMMANDS),
         }), 400
+
+    # SEC-11 / OWASP API5:2023: DANGER-komennot vaativat admin-roolin.
+    # UI näyttää vahvistusmodaalin (SEC-25), mutta server ei luota UI:hin —
+    # tarkistetaan rooli aina myös server-puolella (defense in depth).
+    if command_type in _DANGER_COMMANDS:
+        email, _ = _get_authenticated_email()
+        if email:
+            # Bootstrap-admin ohittaa DB-tarkistuksen
+            if email.lower() not in _BOOTSTRAP_ADMINS:
+                user = get_user(email)
+                if not user or user.get("role") != "admin":
+                    logger.warning(
+                        "DANGER-komento hylätty — ei admin-roolia: email=%s command=%s",
+                        email, command_type
+                    )
+                    return jsonify({
+                        "error": f"Komento {command_type!r} vaatii admin-oikeudet."
+                    }), 403
+        # email on None vain jos _get_authenticated_email palautti None —
+        # require_auth on jo tarkistanut autentikaation, joten tämä ei
+        # normaalisti tapahdu. Defensiivisesti estetään silti.
+        else:
+            return jsonify({"error": "Autentikaatio puuttuu"}), 401
 
     device = get_device(udid)
     if not device:
@@ -337,7 +444,7 @@ def trigger_push(udid: str) -> Response:
 # --- Käyttäjähallinta (OIDC SSO luvitusjärjestelmä) ---------------------------
 
 @admin_bp.get("/users")
-@require_auth
+@require_admin  # SEC-11: vaatii admin-roolin, ei pelkkää authorized-statusta
 def list_all_users() -> Response:
     """Listaa kaikki OIDC-kirjautumista yrittäneet käyttäjät.
 
@@ -351,7 +458,7 @@ def list_all_users() -> Response:
 
 
 @admin_bp.post("/users/<path:email>/authorize")
-@require_auth
+@require_admin  # SEC-11: käyttäjähallinta vaatii admin-roolin
 def authorize_user(email: str) -> Response:
     """Hyväksyy käyttäjän pääsypyynnön.
 
@@ -370,7 +477,7 @@ def authorize_user(email: str) -> Response:
 
 
 @admin_bp.post("/users/<path:email>/deny")
-@require_auth
+@require_admin  # SEC-11: käyttäjähallinta vaatii admin-roolin
 def deny_user(email: str) -> Response:
     """Evää käyttäjän pääsyoikeuden.
 

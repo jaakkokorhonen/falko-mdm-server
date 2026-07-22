@@ -1,92 +1,149 @@
+"""Yhteiset pytest-fixturet kaikille testitiedostoille.
+
+Fixturehierarkia:
+  app        → Flask-sovellus testitilassa (LOCAL_DEV=1, ei oikeaa SECRET_KEY:tä)
+  client     → Flask test_client app-fixturesta
+  mock_db    → kaikki app.admin.*-DB-funktiot korvattu MagicMock-objekteilla
+  admin_user_record   → Firestore-käyttäjäobjekti admin-roolille
+  regular_user_record → Firestore-käyttäjäobjekti user-roolille
+
+Mocking-strategia:
+  Ulkoiset riippuvuudet (Firestore, IAP JWT, OAuth, APNs, Secret Manager)
+  mockataan AINA testeissä — CI-ympäristössä ei ole pääsyä GCP-palveluihin.
+  Mockaukset tehdään mahdollisimman lähellä kutsupaikkaa (app.admin.*)
+  eikä kirjaston tasolla — tämä tekee testeistä robustimpia refaktorointia
+  vastaan.
+
+Ref: pytest fixtures best practices — https://docs.pytest.org/en/stable/reference/fixtures.html
+Ref: CONTRIBUTING.md §Fixture-käyttö
+"""
 import pytest
-import os
-
-# Asetetaan testiympariston muuttujat ennen sovelluksen latausta.
-# APNS_PRIVATE_KEY: EC-avain JWT-allekirjoitukseen (testiarvo, ei oikea avain).
-os.environ["SECRET_KEY"]       = "test-secret-key-123"
-os.environ["GCP_PROJECT"]      = "falko-mdm-test"
-os.environ["APNS_TEAM_ID"]     = "STQ5U5TZR2"
-os.environ["APNS_KEY_ID"]      = "AU467BS82C"
-os.environ["APNS_PRIVATE_KEY"] = (
-    "-----BEGIN EC PRIVATE KEY-----\n"
-    "MHQCAQEEIOaRsVX2m5PBOyq/9j6z5Vc9aA3y1iVFakeKeyDataFakeKeyDataFakeX\n"
-    "oAoGCCqGSM49AwEHoWQDYgAEFakePublicKeyDataFakePublicKeyDataFakePublic\n"
-    "-----END EC PRIVATE KEY-----"
-)
-
+from unittest.mock import MagicMock, patch
 from main import create_app
 
-@pytest.fixture
-def app():
-    app = create_app()
-    app.config.update({
-        "TESTING": True,
-    })
-    yield app
 
-@pytest.fixture
+# ---------------------------------------------------------------------------
+# Sovellus- ja HTTP-client-fixturet
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def app():
+    """Luo Flask-sovelluksen testitilassa.
+
+    LOCAL_DEV=1 aktivoituu jotta SECRET_KEY-vaatimus ei estä käynnistystä.
+    SECRET_KEY generoidaan väliaikaiseksi (secrets.token_urlsafe) — tämä on
+    tarkoituksellista: testisessioiden ei tarvitse persistoida.
+
+    Yields:
+        Flask-sovellus (ei käynnissä, vain WSGI-objekti).
+    """
+    with patch.dict('os.environ', {
+        'LOCAL_DEV': '1',
+        # BOOTSTRAP_ADMIN_EMAIL tyhjäksi — bootstrap-admin-testit asettavat sen itse
+        'BOOTSTRAP_ADMIN_EMAIL': '',
+    }):
+        yield create_app()
+
+
+@pytest.fixture()
 def client(app):
+    """Flask test_client HTTP-pyyntöjen lähettämiseen ilman verkkoyhteyttä.
+
+    Args:
+        app: app-fixture.
+
+    Returns:
+        FlaskClient-instanssi.
+    """
     return app.test_client()
 
+
 # ---------------------------------------------------------------------------
-# Esiluodut kayttajatietueet testiymparistoon
+# Käyttäjäobjekti-fixturet (Firestore-vasteet)
 # ---------------------------------------------------------------------------
-AUTHORIZED_USER = {"email": "test.user@falko.fi",         "status": "authorized", "role": "user",  "created_at": "2026-07-01T00:00:00+00:00", "last_login": "2026-07-22T00:00:00+00:00"}
-PENDING_USER    = {"email": "pending@example.com",         "status": "pending",    "role": "user",  "created_at": "2026-07-20T00:00:00+00:00", "last_login": "2026-07-20T00:00:00+00:00"}
-DENIED_USER     = {"email": "denied@example.com",          "status": "denied",     "role": "user",  "created_at": "2026-07-15T00:00:00+00:00", "last_login": "2026-07-15T00:00:00+00:00"}
-BOOTSTRAP_USER  = {"email": "jaakko.korhonen@gmail.com",   "status": "authorized", "role": "admin", "created_at": "2026-07-01T00:00:00+00:00", "last_login": "2026-07-22T00:00:00+00:00"}
 
-@pytest.fixture(autouse=True)
-def mock_db_operations(mocker):
-    """Mockaa kaikki Firestore-operaatiot testien ajaksi.
+@pytest.fixture()
+def admin_user_record():
+    """Simuloi Firestoren käyttäjäobjektia admin-roolilla.
 
-    Jokainen testi kaynnistyy puhtaalta poydalta.
-    Yksittainen testi voi ylikirjoittaa palautusarvon
-    mocker.patch()-kutsulla ennen toimintaa.
+    Käytetään patch('app.admin.get_user', return_value=admin_user_record)
+    -tyyppisissä testeissä jotka testaavat require_admin-dekoraattoria.
 
-    TARKEA: dequeue_command palauttaa (cmd_id, cmd_dict)-tuplen, jossa
-    cmd_dict kayttaa avaimia 'command_type' ja 'payload' (ei 'command_uuid'
-    tai 'command') — nama ovat mdm.py:n odottama rakenne.
+    Returns:
+        dict joka vastaa Firestoren users-dokumentin rakennetta.
     """
-    # --- Firestore-yhteys (perusmock kaikille db-kutsuille) ---
-    mocker.patch("app.db.get_db")
+    return {
+        'email': 'admin@falko.fi',
+        'role': 'admin',
+        'status': 'authorized',
+    }
 
-    # --- Laitteet ---
-    mocker.patch("app.admin.list_devices", return_value=([
-        {"udid": "device-1", "model": "MacBookAir10,1"},
-        {"udid": "device-2", "model": "MacBookPro18,2"}
-    ], None))
-    mocker.patch("app.admin.get_device", return_value={
-        "udid": "test-udid",
-        "push_magic": "magic-token",
-        "token": "push-token-hex"
-    })
-    mocker.patch("app.admin.enqueue_command")
 
-    # --- Kayttajat (OIDC SSO luvitusjarjestelma) ---
-    # Oletuksena: kirjautuva kayttaja on "authorized".
-    # Testit jotka testaavat pending/denied-tilanteita ylikirjoittavat taman.
-    mocker.patch("app.admin.upsert_user", return_value=AUTHORIZED_USER)
-    mocker.patch("app.admin.get_user", return_value=AUTHORIZED_USER)
-    mocker.patch("app.admin.list_users", return_value=[
-        AUTHORIZED_USER, PENDING_USER, DENIED_USER
-    ])
-    mocker.patch("app.admin.update_user_status")
+@pytest.fixture()
+def regular_user_record():
+    """Simuloi Firestoren käyttäjäobjektia user-roolilla.
 
-    # --- MDM-protokolla ---
-    mocker.patch("app.checkin.upsert_device")
+    Käytetään testeissä jotka varmistavat että user-rooli ei pääse
+    DANGER-komentoihin tai /users-endpointteihin.
 
-    # MDM-puolen upsert_device (eri importtipolku kuin checkin.py:ssa).
-    # Tama on patchattava erikseen — mdm.py importoi suoraan app.db:sta.
-    mocker.patch("app.mdm.upsert_device")
+    Returns:
+        dict joka vastaa Firestoren users-dokumentin rakennetta.
+    """
+    return {
+        'email': 'user@falko.fi',
+        'role': 'user',
+        'status': 'authorized',
+    }
 
-    # dequeue_command palauttaa (cmd_id, cmd_dict).
-    # cmd_dict-rakenne: avaimet 'command_type' ja 'payload' —
-    # nama ovat mdm.py:n cmd.get('command_type') ja cmd.get('payload') -kutsujen
-    # odottamat avaimet. Aiempi rakenne {'command_uuid': ..., 'command': {...}}
-    # ei tasmaa ja aiheutti hiljaisen oletusarvon 'DeviceInformation'.
-    mocker.patch("app.mdm.dequeue_command", return_value=("cmd-123", {
-        "command_type": "DeviceLock",
-        "payload": {},
-    }))
-    mocker.patch("app.mdm.ack_command")
+
+# ---------------------------------------------------------------------------
+# DB-mock-fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def mock_db(monkeypatch):
+    """Korvaa kaikki app.admin.*-DB-funktiot MagicMock-objekteilla.
+
+    Tämä estää oikeat Firestore-kutsut CI-ympäristössä. Kaikki mock-metodit
+    ovat MagicMock-oletusarvoja — yksittäinen testi voi ylikirjoittaa
+    haluamansa (esim. mock_db.get_device.return_value = {...}).
+
+    Args:
+        monkeypatch: pytest-fixture moduulitason symbolien korvaamiseen.
+
+    Returns:
+        MagicMock-objekti jossa get_device, enqueue_command, list_devices,
+        send_push, get_user, upsert_user, list_users, update_user_status
+        -attribuutit.
+    """
+    mock = MagicMock()
+
+    # Laite jota useimmat testit käyttävät oletuksena
+    mock.get_device.return_value = {
+        'udid': 'TEST-UDID-0001',
+        'serial': 'C02XG0JJHTD6',
+        'model': 'MacBookPro18,1',
+        'status': 'enrolled',
+    }
+    # Kaksielementtinen laitelista list_devices-kutsulle
+    mock.list_devices.return_value = (
+        [
+            {'udid': 'device-1', 'serial': 'C02AA111', 'status': 'enrolled'},
+            {'udid': 'device-2', 'serial': 'C02BB222', 'status': 'enrolled'},
+        ],
+        None,  # next_page_token
+    )
+    # enqueue_command palauttaa komento-ID:n
+    mock.enqueue_command.return_value = 'cmd-uuid-abcd'
+
+    # Monkeypatch: korvataan app.admin-moduulissa käytetyt nimet
+    monkeypatch.setattr('app.admin.get_device',          mock.get_device)
+    monkeypatch.setattr('app.admin.enqueue_command',     mock.enqueue_command)
+    monkeypatch.setattr('app.admin.list_devices',        mock.list_devices)
+    monkeypatch.setattr('app.admin.send_push',           mock.send_push)
+    monkeypatch.setattr('app.admin.get_user',            mock.get_user)
+    monkeypatch.setattr('app.admin.upsert_user',         mock.upsert_user)
+    monkeypatch.setattr('app.admin.list_users',          mock.list_users)
+    monkeypatch.setattr('app.admin.update_user_status',  mock.update_user_status)
+
+    return mock
