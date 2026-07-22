@@ -10,8 +10,10 @@ Paikallinen ajo: LOCAL_DEV=1 python main.py
 
 Parannus (2026-07): middleware (security headers, rate limiting) rekisteröity.
 Korjaus (2026-07): SECRET_KEY-fallback poistettu (SEC-15).
+Korjaus (2026-07): LOCAL_DEV-fallback käyttää secrets.token_urlsafe(48) (SEC-15 jätko).
 """
 import os
+import secrets
 import logging
 from flask import Flask
 from flask_cors import CORS
@@ -57,13 +59,21 @@ def create_app() -> Flask:
     # tuotannossa Cloud Run -ympäristömuuttuja on pakollinen.
     # Generoi vahva avain: openssl rand -base64 32
     # Tallenna: gcloud secrets create falko-secret-key --data-file=-
+    #
+    # SEC-15 jätko: käytetään secrets.token_urlsafe(48) staattisen
+    # 'local-dev-only-...' -merkkijonon sijaan. Syä:
+    #   1. Staattinen vakio voi vahingossa committautua .env-tiedostoon.
+    #   2. Staattinen vakio voi päätyä loggeihin tai virheilmoituksiin.
+    #   3. secrets.token_urlsafe(48) tuottaa 64-merkkisen kryptografisesti
+    #      vahvan avaimen joka restartin yhteydessä — hyväksyttävää
+    #      LOCAL_DEV-ympäristössä jossa sessioiden jatkuvuus ei ole vaatimus.
     _secret_key = os.environ.get("SECRET_KEY", "")
     if not _secret_key:
         if os.environ.get("LOCAL_DEV") == "1":
-            _secret_key = "local-dev-only-not-for-production"  # nosec B105
+            _secret_key = secrets.token_urlsafe(48)
             logging.getLogger(__name__).warning(
-                "SECRET_KEY puuttuu — käytetään kehitysavainta (LOCAL_DEV=1). "
-                "ÄLÄ käytä tuotannossa."
+                "SECRET_KEY puuttuu — generoidaan väliaikainen kehitysavain (LOCAL_DEV=1). "
+                "Avain vaihtuu restartin yhteydessä. ÄLÄ käytä tuotannossa."
             )
         else:
             raise ValueError(
@@ -89,7 +99,7 @@ def create_app() -> Flask:
 app = create_app()
 
 if __name__ == "__main__":
-    # Paikallinen ajo kehityskäyttöön. Tuotannossa Gunicorn käynnistää suoraan
+    # Paikallinen ajo kehitystkäyttöön. Tuotannossa Gunicorn käynnistää suoraan
     # 'app'-objektin (ks. Dockerfile CMD).
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)  # nosec B104
