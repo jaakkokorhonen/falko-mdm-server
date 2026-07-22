@@ -7,32 +7,18 @@ Toimii yhdessä [falko-device-onboarding](https://github.com/jaakkokorhonen/falk
 
 ---
 
-## Tietoturvaperiaate: IAP ja OIDC
+## Tietoturvaperiaate: 100% Google OIDC & Firestore Authorization
 
-Tämä palvelin pyörii Cloud Runilla ja käyttää Firestorea. Molemmat ovat jo Googlen luottamuspiirissä. Admin-rajapinta on suojattu **Identity-Aware Proxy (IAP)** -tasolla, mikä korvaa perinteisen token-pohjaisen tunnistautumisen Google Workspace OIDC -istunnoilla:
+Tämä palvelin pyörii Cloud Runilla ja käyttää Firestorea. Admin-rajapinta (`/admin/*`) on suojattu **nollaluottamusperiaatteella (Zero Trust API)** 100% Google OIDC OAuth 2.0 ID Token -tunnistautumisella ja Firestore-pohjaisella pääsynhallinnalla:
 
-- **OIDC käyttöliittymässä (UI):** Käyttöliittymässä ei tarvitse olla omaa kirjautumistoiminnallisuutta tai kirjastoa. Kun käyttäjä menee selaimella admin-UI-osoitteeseen, Google IAP sieppaa pyynnön verkkokerroksessa ja ohjaa kirjautumattoman käyttäjän Googlen Workspace OIDC -kirjautumissivulle.
-- **Istunnon välitys (Cookies):** Onnistuneen kirjautumisen jälkeen selain saa Googlen istuntoevästeen. Kaikki käyttöliittymästä palvelimelle tehtävät API-pyynnöt kulkevat `credentials: 'include'` -asetuksella, jolloin selain liittää evästeen pyyntöihin automaattisesti.
-- **Identiteetin välitys palvelimelle (Headers):** IAP tarkistaa pyynnöt verkkokerroksessa, riisuu arkaluontoiset evästeet ja välittää pyynnön Flask-sovellukselle lisäten luotetut otsakkeet:
-  * `X-Goog-Authenticated-User-Email` — käyttäjän sähköpostiosoite (muodossa `accounts.google.com:jaakko@falko.fi`).
-  * `X-Goog-Authenticated-User-Id` — uniikki käyttäjä-ID.
-  * `X-Goog-IAP-JWT-Assertion` — Googlen allekirjoittama kryptografinen JWT-varmenne.
-- **Domain-rajoitus:** Flask-palvelin (`app/admin.py`) lukee sähköpostin otsakkeesta ja varmistaa, että sen loppuosa on `@falko.fi`. Muut pyynnöt hylätään automaattisesti.
+- **Google OAuth ID Token verifiointi (`app/admin.py`):** Jokaisessa kutsussa kulkee `Authorization: Bearer <GOOGLE_ID_TOKEN>`. Palvelin vahvistaa tokenin kryptografisesti suoraan Googlen julkisilla RSA-avaimilla (`google-auth`-kirjasto).
+- **Firestore Access Control (`users/{email}`):**
+  - **Bootstrap Admin (`jaakko.korhonen@gmail.com`):** Suora pääsy ylläpitotoimintoihin.
+  - **`authorized`:** Hyväksytty ylläpitäjä/käyttäjä.
+  - **`pending` / `denied`:** Estetään pääsy (HTTP 403 Forbidden).
+- **CORS & Multi-Environment Support (`main.py`):** Palvelin sallii turvalliset cross-origin -kutsut tuotannolle (`https://mdm.falko.fi`), QA-ympäristöille (`https://*.web.app`, `https://qa.mdm.falko.fi`) sekä paikalliselle kehitykselle (`http://localhost:*`).
 
-> **Periaate:** Kun infrastruktuuri on jo GCP:ssä, autentikaatio kuuluu infrastruktuuriin — ei sovelluskoodiin.
-
-### IAP:n aktivointi
-
-```bash
-# Aktivoi IAP Cloud Run -palvelulle
-gcloud services enable iap.googleapis.com
-
-# Salli pääsy vain Falkon Workspace-domainille
-gcloud iap web add-iam-policy-binding \
-  --resource-type=backend-services \
-  --member="domain:falko.fi" \
-  --role="roles/iap.httpsResourceAccessor"
-```
+> **Periaate:** Kaikki pääsy vaatii aina todennetun Google OIDC -identiteetin ja Firestore-hyväksynnän (*Always Check, Always Verify*). Palvelimella ei ole manuaalisia Admin Token -salanoja.
 
 ---
 
