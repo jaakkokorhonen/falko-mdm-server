@@ -13,6 +13,12 @@ Rate limiting:
   jos Cloud Run skaalaa useampaan instanssiin.
   Ref: Fielding & Reschke (2022) RFC 9110 §15.5.30 (429 Too Many Requests).
   Ref: OWASP API Security Top 10 (2023) API4:2023 Unrestricted Resource Consumption.
+
+IP-osoitteen lähde (SEC-6):
+  Käytetään request.remote_addr eikä X-Forwarded-For-otsakkeen ensimmäistä arvoa.
+  X-Forwarded-For on asiakkaan asettama ja siten spooffattavissa.
+  Cloud Run asettaa remote_addr luotettavasti load balancerin oikeaksi IP:ksi.
+  Ref: CWE-348 Use of Less Trusted Source for IP Address.
 """
 import time
 import random
@@ -80,9 +86,15 @@ def register_middleware(app: Flask) -> None:
         # Ohitetaan healthz — Cloud Runin health check ei saa saada 429
         if request.path == "/healthz":
             return
-        # X-Forwarded-For: Cloud Run asettaa tämän, käytetään ensimmäistä IP:tä
-        forwarded_for = request.headers.get("X-Forwarded-For", "")
-        ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.remote_addr or "unknown")
+
+        # SEC-6: Luetaan IP request.remote_addr:sta, EI X-Forwarded-For-otsakkeen
+        # ensimmäisestä arvosta. X-Forwarded-For on asiakkaan asettama ja
+        # spooffattavissa — hyökkääjä voi asettaa sen mielivaltaiseksi arvoksi
+        # ja ohittaa rate limitin. Cloud Run asettaa remote_addr luotettavasti
+        # load balancerin oikeaksi lähde-IP:ksi.
+        # Ref: CWE-348, OWASP API4:2023.
+        ip = request.remote_addr or "unknown"
+
         if _is_rate_limited(ip):
             logger.warning("Rate limit ylitetty: ip=%s path=%s", ip, request.path)
             return jsonify({"error": "Liian monta pyyntöä — yritä uudelleen hetken kuluttua"}), 429

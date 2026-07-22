@@ -6,9 +6,10 @@ Rekisteröi Blueprintit:
   - admin_bp    → /admin/*        (Admin API, IAP-suojattu)
 
 Cloud Runissa käynnistys tapahtuu Gunicornin kautta (Dockerfile).
-Paikallinen ajo: python main.py
+Paikallinen ajo: LOCAL_DEV=1 python main.py
 
 Parannus (2026-07): middleware (security headers, rate limiting) rekisteröity.
+Korjaus (2026-07): SECRET_KEY-fallback poistettu (SEC-15).
 """
 import os
 import logging
@@ -34,6 +35,9 @@ def create_app() -> Flask:
 
     Returns:
         Konfiguroitu Flask-instanssi.
+
+    Raises:
+        ValueError: Jos SECRET_KEY-ympäristömuuttuja puuttuu tuotantoympäristössä.
     """
     app = Flask(__name__)
     CORS(
@@ -47,10 +51,26 @@ def create_app() -> Flask:
         ]}},
         supports_credentials=True
     )
-    # SECRET_KEY vaaditaan Flaskin sessioille. MDM-protokolla ei käytä sessioita,
-    # mutta Flask vaatii arvon — tuotannossa aseta vahva satunnainen arvo:
-    #   openssl rand -base64 32 | gcloud secrets create falko-secret-key --data-file=-
-    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-me")
+
+    # SEC-15: SECRET_KEY ei saa olla kovakoodattu fallback-arvo.
+    # Paikallisessa kehityksessä (LOCAL_DEV=1) sallitaan heikko avain —
+    # tuotannossa Cloud Run -ympäristömuuttuja on pakollinen.
+    # Generoi vahva avain: openssl rand -base64 32
+    # Tallenna: gcloud secrets create falko-secret-key --data-file=-
+    _secret_key = os.environ.get("SECRET_KEY", "")
+    if not _secret_key:
+        if os.environ.get("LOCAL_DEV") == "1":
+            _secret_key = "local-dev-only-not-for-production"  # nosec B105
+            logging.getLogger(__name__).warning(
+                "SECRET_KEY puuttuu — käytetään kehitysavainta (LOCAL_DEV=1). "
+                "ÄLÄ käytä tuotannossa."
+            )
+        else:
+            raise ValueError(
+                "SECRET_KEY-ympäristömuuttuja on pakollinen tuotannossa. "
+                "Aseta se Cloud Run -salaisuutena tai ympäristömuuttujana."
+            )
+    app.config["SECRET_KEY"] = _secret_key
 
     app.register_blueprint(mdm_bp)
     app.register_blueprint(checkin_bp)
