@@ -37,7 +37,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install bandit pip-audit checkov pytest-cov
+          pip install bandit pip-audit checkov
 
       # 5. Sovelluksen haavoittuvuuksien skannaus (Bandit SAST)
       - name: Run Bandit SAST Scan
@@ -54,7 +54,34 @@ jobs:
         run: |
           checkov -d terraform/ --framework terraform
 
-      # 8. Yksikkötestien suoritus kattavuusraportilla (Pytest)
-      - name: Run Pytest Unit Tests with Coverage
+      # 8a. PR-ajo: vain smoke-testit (nopea signaali, <30s tavoite)
+      #     Ajetaan jokaisessa pull requestissa ennen review-pyyntöä.
+      #     Ref: pyproject.toml markers (smoke, regression, slow)
+      - name: Smoke tests (PR)
+        if: github.event_name == 'pull_request'
         run: |
-          PYTHONPATH=. pytest -v --cov=app --cov-report=term-missing
+          PYTHONPATH=. pytest -m smoke --tb=short -v
+
+      # 8b. Main-ajo: regression-sarja + coverage-raportointi
+      #     Ajetaan kun koodi mergeytyy main-haaraan.
+      #     fail_under-raja on pyproject.toml:ssa (70 → nostetaan 80:een
+      #     kun yksikkötestit #7, #8, #9 on kirjoitettu).
+      - name: Regression tests + coverage (main)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          PYTHONPATH=. pytest -m "smoke or regression" \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            -v
+
+      # 9. Julkaise coverage.xml artefaktina (saatavilla Actions-välilehdeltä)
+      #    Käytetään myöhemmin mahdolliseen Codecov-integraatioon tai
+      #    PR-kommentointiin (esim. pytest-coverage-comment action).
+      - name: Upload coverage report
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 30
