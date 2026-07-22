@@ -5,6 +5,38 @@ kommentointiin ja repositorion rakenteen ylläpitoon.
 
 ---
 
+## Tämän repon vastuu
+
+`falko-mdm-server` vastaa yksinomaan **backend-palvelimen** elinkaaren hallinnasta:
+
+- **Issuet:** Kaikki server-puolen bugi-ilmoitukset, tietoturvalöydökset ja
+  arkkitehtuurimuutokset kirjataan **tähän repoon**. Älä avaa server-issueita
+  `falko-mdm-ui`- tai `falko-device-onboarding`-repoihin.
+- **Deployment-skriptit:** `deploy.sh`, `cloudbuild.yaml` ja `Dockerfile`
+  kuuluvat tähän repoon. Ne deployvat **ainoastaan** tämän repon Cloud Run
+  -palvelun. UI:n tai onboarding-skriptien deployment on niiden omien repojen
+  vastuulla.
+- **Terraform:** `terraform/`-kansio hallitsee tämän palvelun GCP-resurssit:
+  Cloud Run -palvelu, Firestore-säännöt, Secret Manager -salaisuudet ja
+  tähän palveluun liittyvät IAM-oikeudet. Firebase Hosting tai UI-resurssit
+  eivät kuulu tänne.
+- **Ympäristömuuttujat:** `IAP_AUDIENCE`, `GOOGLE_OAUTH_CLIENT_ID`, `SECRET_KEY`,
+  `APNS_KEY_SECRET`, `BOOTSTRAP_ADMIN_EMAIL` — näiden hallinta on tämän repon
+  Cloud Run -konfiguraatiossa ja Secret Managerissa.
+
+### Reporajat lyhyesti
+
+| Asia | Tämä repo | falko-mdm-ui | falko-device-onboarding |
+|---|---|---|---|
+| Server-bugi tai SEC-issue | ✅ | ❌ | ❌ |
+| UI-bugi tai UX-issue | ❌ | ✅ | ❌ |
+| Onboarding-skripti tai mobileconfig | ❌ | ❌ | ✅ |
+| Cloud Run deploy | ✅ | ❌ | ❌ |
+| Firebase Hosting deploy | ❌ | ✅ | ❌ |
+| GCP Secret Manager (server-salaisuudet) | ✅ | ❌ | ❌ |
+
+---
+
 ## Repositorion rakenne
 
 ```
@@ -157,10 +189,11 @@ pip install -r requirements.txt
 pip install pytest pytest-flask  # testikirjastot
 
 # 2. Ympäristömuuttujat paikalliseen ajoon
+export LOCAL_DEV=1
 export GCP_PROJECT=your-project-id
 export APNS_TEAM_ID=XXXXXXXXXX
 export APNS_KEY_ID=XXXXXXXXXX
-export APNS_PRIVATE_KEY="$(cat path/to/key.p8)"
+export APNS_KEY_SECRET=projects/your-project/secrets/apns-key/versions/latest
 
 # 3. Käynnistä kehitysserveri
 python main.py
@@ -168,6 +201,28 @@ python main.py
 # 4. Aja testit
 pytest tests/ -v
 ```
+
+> **Huom:** Tuotantoympäristössä `IAP_AUDIENCE`, `GOOGLE_OAUTH_CLIENT_ID` ja
+> `SECRET_KEY` ovat pakollisia. Palvelin ei käynnisty ilman niitä (paitsi
+> `LOCAL_DEV=1` -tilassa).
+
+---
+
+## Deployment
+
+`deploy.sh` ja `cloudbuild.yaml` deployvat **ainoastaan tämän repon** Cloud Run
+-palvelun. Ne eivät koske UI:ta eivätkä onboarding-skriptejä.
+
+```bash
+# Manuaalinen deploy (käytä vain hätätilanteessa — normaali polku on CI/CD)
+bash deploy.sh
+
+# CI/CD: Google Cloud Build triggeröityy automaattisesti main-haaroituksesta
+# Katso: cloudbuild.yaml
+```
+
+UI:n deployment: katso `falko-mdm-ui` → `.github/workflows/deploy.yml`.
+Onboarding-jakelun päivitys: katso `falko-device-onboarding` → oma README.
 
 ---
 
@@ -206,7 +261,7 @@ docs: päivitä CONTRIBUTING.md kommentointikäytännöillä
 
 ## Tietoturvakäytännöt
 
-- **Ei salaisuuksia koodissa.** Kaikki avaimet, tokenit ja tunnukset ympäristömuuttujina.
+- **Ei salaisuuksia koodissa.** Kaikki avaimet, tokenit ja tunnukset ympäristömuuttujina tai Secret Managerissa.
 - **IAP ennen kaikkea.** Admin-endpointit eivät saa olla saavutettavissa ilman IAP-suojausta.
   Katso [README: Tietoturvaperiaate](./README.md#tietoturvaperiaate-iap-rajaa-luottamuksen-cloud-runiin).
 - **Riippuvuudet pinnattuina.** `requirements.txt` käyttää tarkkoja versioita (`==`). Päivitykset
