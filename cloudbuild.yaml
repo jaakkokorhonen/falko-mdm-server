@@ -1,5 +1,13 @@
 # GCP Cloud Build -pipeline: rakentaa Docker-imagen ja ajaa Terraform-julkaisun
-# Triggeröityy automaattisesti kun muutokset yhdistetään main-haaraan
+# Triggeröityy automaattisesti kun muutokset yhdistetään main-haaraan.
+# Triggeri on määritelty Terraformilla: terraform/cloudbuild_trigger.tf
+#
+# Muuttujat ($_APNS_TEAM_ID, $_APNS_KEY_ID, $_SECRET_KEY) tulevat
+# Cloud Build -triggerin substitution-arvoista (ei kovakoodattu tähän).
+# Katso terraform/cloudbuild_trigger.tf kommentit arvojen asettamisesta.
+#
+# Terraform-muuttujat (gcp_project_id, gcp_region, dns_project_id, dns_zone_name)
+# on määritelty variables.tf:ssä oletusarvoilla — niitä ei toisteta tässä.
 
 steps:
   # 1. Rakennetaan Docker-image
@@ -10,7 +18,9 @@ steps:
       - 'europe-north1-docker.pkg.dev/$PROJECT_ID/falko/mdm-server:latest'
       - '.'
 
-  # 2. Tallennetaan kuva Artifact Registryyn (Artifact Analysis skannaa tämän automaattisesti)
+  # 2. Tallennetaan kuva Artifact Registryyn
+  # Artifact Registry on määritelty Terraformilla: terraform/artifact_registry.tf
+  # Artifact Analysis skannaa tämän automaattisesti.
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - push
@@ -23,15 +33,15 @@ steps:
       - 'init'
 
   # 4. Ajetaan Terraform julkaisemaan kaikki pilviresurssit
+  # Vain sensitiiviset ja build-kohtaiset muuttujat annetaan tässä.
+  # Muut muuttujat (gcp_region, dns_project_id, dns_zone_name jne.) käyttävät
+  # variables.tf:n oletusarvoja.
   - name: 'hashicorp/terraform:1.8.0'
     dir: 'terraform'
     args:
       - 'apply'
       - '-auto-approve'
       - '-var=gcp_project_id=$PROJECT_ID'
-      - '-var=gcp_region=europe-north1'
-      - '-var=dns_project_id=froide'
-      - '-var=dns_zone_name=falko-fi-zone'
       - '-var=apns_team_id=$_APNS_TEAM_ID'
       - '-var=apns_key_id=$_APNS_KEY_ID'
       - '-var=secret_key=$_SECRET_KEY'
