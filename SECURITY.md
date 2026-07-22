@@ -15,16 +15,11 @@ Tai GitHub Security Advisories: Settings → Security → Advisories → New dra
 
 ## Tietoturva-arkkitehtuuri
 
-### Autentikaatio
-
-- **Admin API** (`/admin/*`) suojattu Google Identity-Aware Proxy (IAP) JWT:llä.
-  JWT verifioidaan kryptografisesti Googlen julkisilla avaimilla (ES256).
-  Ref: https://cloud.google.com/iap/docs/signed-headers-howto
-- **MDM/CheckIn endpointit** eivät vaadi käyttäjäautentikaatiota — ne on tarkoitettu
-  Apple-laitteiden käyttöön. Laitteen identiteetti perustuu TLS-asiakassertifikaattiin
-  (MDM Identity Certificate, sisältyy mobileconfig-profiiliin).
-- **ADMIN_TOKEN** on tarkoitettu vain CI/CD- ja skriptikäyttöön.
-  Käytä vähintään 32-merkkistä satunnaista arvoa: `openssl rand -base64 32`
+- **Admin API (`/admin/*`)** suojattu 100% Google OIDC OAuth 2.0 ID Token -verifioinnilla ja IAP JWT:llä.
+  Google ID Token vahvistetaan kryptografisesti Googlen julkisilla RSA-avaimilla (`google-auth`-kirjasto).
+- **Firestore Access Control (`users/{email}`):** Jokaisen todennetun pyynnön kohdalla verifioidaan luvitusstatus Firestoresta (`authorized` / `pending` / `denied`).
+- **MDM/CheckIn endpointit:** Apple-laitteiden yhteys laitesertifikaatilla ja push-magic -tunnisteella.
+- **Zero-Trust & No Admin Token Fallbacks:** Palvelimella ei ole manuaalisia Admin Token -salanoja — kaikki pääsy vaatii vahvistetun Google SSO -identiteetin.
 
 ### Syötteen validointi
 

@@ -120,32 +120,43 @@ gcloud builds triggers create github \
 
 ---
 
-## Admin API
+## Admin API & Autentikaatiomalli
 
-Admin-endpointit on suojattu IAP:lla (`domain:falko.fi`). Suorissa API-kutsuissa
-(CI, skriptit) käytetään `Authorization: Bearer <ADMIN_TOKEN>` -fallbackia.
+Admin-endpointit on suojattu **nollaluottamusperiaatteella (Zero Trust API)** 100% Google OIDC OAuth 2.0 ID Token -tunnistautumisella ja Firestore-pohjaisella pääsynhallinnalla.
+
+### Autentikaation ja luvituksen toimintaperiaate
+1. **Google OAuth ID Token verifiointi:** Jokaisessa kutsussa kulkee `Authorization: Bearer <GOOGLE_ID_TOKEN>`. Palvelin vahvistaa tokenin kryptografisesti suoraan Googlen julkisilla RSA-avaimilla (`google.oauth2.id_token`).
+2. **Firestore Access Control (`users/{email}`):**
+   - **Bootstrap Admin (`jaakko.korhonen@gmail.com`):** Suora pääsy ylläpitotoimintoihin.
+   - **`authorized`:** Hyväksytty ylläpitäjä/käyttäjä.
+   - **`pending`:** Estetään pääsy (HTTP 403 Forbidden).
+   - **`denied`:** Estetään pääsy (HTTP 403 Forbidden).
 
 ### Laitteiden listaus
 ```bash
-# IAP-autentikoitu selain hoitaa tokenin automaattisesti
-# Skriptikäyttö:
-curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://falko-mdm-server-xxx-lm.a.run.app/admin/devices
+curl -H "Authorization: Bearer $GOOGLE_ID_TOKEN" \
+  https://mdm-api.falko.fi/admin/devices
 ```
 
 ### Komennon lähettäminen
-
 ```bash
 # Laitteen lukitseminen
-curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+curl -X POST -H "Authorization: Bearer $GOOGLE_ID_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"command_type": "DeviceLock"}' \
-  https://falko-mdm-server-xxx-lm.a.run.app/admin/devices/<UDID>/command
+  https://mdm-api.falko.fi/admin/devices/<UDID>/command
 
 # APNs herätys (laite hakee komennon heti)
-curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://falko-mdm-server-xxx-lm.a.run.app/admin/devices/<UDID>/push
+curl -X POST -H "Authorization: Bearer $GOOGLE_ID_TOKEN" \
+  https://mdm-api.falko.fi/admin/devices/<UDID>/push
 ```
+
+### Käyttäjähallinnan API (User Management)
+| Endpoint | HTTP | Kuvaus |
+|---|---|---|
+| `/admin/users` | GET | Listaa kaikki OIDC-kirjautuneet käyttäjät ja heidän tilansa |
+| `/admin/users/<email>/authorize` | POST | Hyväksyy käyttäjän pääsypyynnön (`authorized`) |
+| `/admin/users/<email>/deny` | POST | Evää käyttäjän pääsypyynnön (`denied`) |
 
 ### Tuetut MDM-komennot
 
