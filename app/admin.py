@@ -20,7 +20,8 @@ kuka tahansa ennen IAP-kerrosta pääsevä voi spoofattaa X-Goog-Authenticated-U
 Ref: https://cloud.google.com/iap/docs/signed-headers-howto
 
 Parannus (2026-07): list_devices tukee sivutusta, command_type validoitu
-  sallittujen arvojen listaa vasten (allowlist), structured logging.
+  sallittujen arvojen listaa vasten (allowlist), DANGER-komennot vaativat
+  admin-roolin (OWASP ASVS v4.0 §4.1.2, NIST SP 800-53 AC-6).
   Ref: OWASP API Security Top 10 (2023) API3:2023 Broken Object Property Level Authorization.
 """
 import os
@@ -39,8 +40,10 @@ from .db import (
 )
 from .apns import send_push
 
-# Suorat pääsyoikeudet email-osoitteen perusteella (bootstrap admin).
-# Nämä käyttäjät saavat pääsyn automaattisesti ilman Firestore-tarkistusta.
+# Bootstrap-adminit — ehdoton pääsy ilman Firestore-tarkistusta.
+# Nämä käyttäjät saavat automaattisesti admin-roolin ensimmäisellä kirjautumisella.
+# Tarkoitus: varmistaa että pääsy on olemassa ennen kuin Firestore-kantaan
+# on tallennettu yhtään käyttäjää (bootstrapping-ongelma).
 _BOOTSTRAP_ADMINS: frozenset[str] = frozenset({
     "jaakko.korhonen@gmail.com",
 })
@@ -54,8 +57,9 @@ logger = logging.getLogger(__name__)
 # Löydät arvon: gcloud iap web describe --resource-type=backend-services
 IAP_AUDIENCE = os.environ.get("IAP_AUDIENCE", "")
 
-# Sallitut MDM command_type -arvot.
+# Sallitut MDM command_type -arvot (allowlist).
 # Allowlist estää mielivaltaisten RequestType-arvojen injektoinnin Apple-protokollaan.
+# Uusien komentojen lisäys: lisää arvo TÄHÄN listaan JA päivitä api.js:n COMMANDS-lista.
 # Ref: OWASP ASVS v4.0 §5.1.3 — Positive server-side input validation.
 _ALLOWED_COMMANDS: frozenset[str] = frozenset({
     "DeviceInformation",
@@ -68,6 +72,24 @@ _ALLOWED_COMMANDS: frozenset[str] = frozenset({
     "DisableRemoteDesktop",
     "ScheduleOSUpdate",
     "ActiveNSExtensions",  # Listaa aktiiviset Network Extensions (VPN, DNS proxy jne.)
+})
+
+# Vaaralliset komennot — vaativat admin-roolin käyttäjältä.
+#
+# Miksi erillinen lista eikä merkki _ALLOWED_COMMANDS-rakentessa?
+# → Selkeys: security-tarkistus löytyy yhdestä paikasta ilman rakenteen
+#   muutosta. Uuden vaarallisen komennon lisäys = lisätään tähän settiin.
+#
+# Vaarallisuuden kriteerit:
+#   EraseDevice    — pyyhkii laitteen tehdasasetuksiin, kaikki data häviää
+#   ShutDownDevice — sammuttaa laitteen eikä käynnistä automaattisesti uudelleen
+#
+# OWASP ASVS v4.0 §4.1.2: "Verify that all user and data attributes and policy
+# information used by access controls cannot be manipulated by end users"
+# NIST SP 800-53 AC-6: Principle of Least Privilege
+_DANGER_COMMANDS: frozenset[str] = frozenset({
+    "EraseDevice",
+    "ShutDownDevice",
 })
 
 
@@ -139,6 +161,32 @@ def _check_user_access(email: str) -> tuple[bool, str, int]:
     return False, "Käyttöoikeutesi on vielä käsittelyssä. Odota ylläpitäjän hyväksyntää.", 403
 
 
+def _get_authenticated_email() -> str | None:
+    """Palauttaa autentikoidun käyttäjän sähköpostin tai None.
+
+    Apufunktio joka tiivistää IAP + OAuth -autentikaatiologiikan yhteen paikkaan.
+    Tarvitaan kun endpoint haluaa tietää käyttäjän identiteetin require_auth-
+    dekoraattorin jälkeen (esim. roolitarkistusta varten).
+
+    Kutsutaan require_auth-dekoraattorin läpäisevissä reittifunktioissa.
+    Ei kuulu require_auth:iin suoraan, koska palauttaa vain emailin ilman
+    403-vastauksia — se on dekoraattorin tehtävä.
+
+    Returns:
+        Sähköpostiosoite tai None jos autentikaatio epäonnistui.
+    """
+    iap_jwt = request.headers.get("X-Goog-IAP-JWT-Assertion", "")
+    if iap_jwt:
+        return _verify_iap_jwt(iap_jwt)
+
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        return _verify_google_oauth_token(token)
+
+    return None
+
+
 def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
     """Dekoraattori: autentikoi pyyntö IAP JWT:llä tai Google OAuth ID Tokenilla.
 
@@ -172,7 +220,7 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
         # --- Vaihtoehto 2: Authorization Header (Google OAuth ID Token) ---
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
-            token = auth_header.split(" ")[1]
+            token = auth_header.split(" ", 1)[1]
 
             # Google OAuth ID Token — verifioi + tarkista luvitusstatus
             email = _verify_google_oauth_token(token)
@@ -242,6 +290,12 @@ def send_command(udid: str) -> Response:
     Laite hakee komennon seuraavalla MDM-pollilla tai APNs-herätyksen
     jälkeen. Komento ei siis toteudu välittömästi.
 
+    Käyttöoikeudet:
+      - Kaikki authenticated-käyttäjät: normaalit komennot
+      - Vain admin-rooli: _DANGER_COMMANDS (EraseDevice, ShutDownDevice)
+        Perustelut: peruuttamaton toiminto, vaatii korotettuja oikeuksia.
+        OWASP ASVS v4.0 §4.1.2, NIST SP 800-53 AC-6.
+
     Body (JSON)::
 
         {
@@ -258,7 +312,7 @@ def send_command(udid: str) -> Response:
 
     Returns:
         Response: 202 Accepted { status: "queued", command_type } jos onnistui,
-        tai virhe ja 400/404.
+        tai virhe ja 400/403/404.
     """
     body = request.get_json(silent=True) or {}
     command_type = body.get("command_type")
@@ -275,6 +329,34 @@ def send_command(udid: str) -> Response:
             "error": f"Tuntematon command_type: {command_type!r}",
             "allowed": sorted(_ALLOWED_COMMANDS),
         }), 400
+
+    # Roolitarkistus vaarallisille komennoille (Principle of Least Privilege).
+    # require_auth on jo varmistanut autentikaation — tässä tarkistetaan vain rooli.
+    # _get_authenticated_email() kutsutaan toiseen kertaan pyyntökontekstissa;
+    # tämä on tietoinen päätös: vaihtoehtona olisi tallentaa email flask.g-objektiin
+    # require_auth-dekoraattorissa, mutta se lisäisi kytköstä dekoraattorin ja
+    # reittifunktioiden välille. Toinen kutsu on halpa (ei verkkoyhteyttä testissä).
+    # TODO(jaakko): Harkitse flask.g.user_email-tallennusta kun admin-endpointteja
+    #              on enemmän (DRY-periaate).
+    if command_type in _DANGER_COMMANDS:
+        email = _get_authenticated_email()
+        if email is None:
+            # Tähän ei pitäisi päästä (require_auth hoitaa auth-tarkistuksen),
+            # mutta defensive programming: jos jotenkin email puuttuu → 401.
+            return jsonify({"error": "Autentikaatio puuttuu"}), 401
+
+        user = get_user(email)
+        # Roolitarkistus: vain admin voi ajaa vaarallisia komentoja.
+        # Bootstrap-adminit on jo käsitelty _check_user_access:ssa — he saavat
+        # aina admin-roolin upsert_user:n kautta.
+        if not user or user.get("role") != "admin":
+            logger.warning(
+                "Estetty DANGER-komento roolin takia: %s yritti %r (rooli: %s)",
+                email, command_type, user.get("role") if user else "N/A",
+            )
+            return jsonify({
+                "error": f"{command_type!r} on peruuttamaton komento — vain admin-rooli sallittu."
+            }), 403
 
     device = get_device(udid)
     if not device:
