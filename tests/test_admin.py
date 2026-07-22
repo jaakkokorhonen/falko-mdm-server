@@ -23,13 +23,13 @@ def test_admin_list_devices_unauthorized(client):
     assert response.json == {"error": "Autentikaatio puuttuu tai on virheellinen"}
 
 
-def test_admin_list_devices_authorized_by_admin_token(client, mocker):
-    """Varmistaa, että /admin/devices toimii oikealla ADMIN_TOKEN -Bearer-tokenilla."""
-    mocker.patch("app.admin.ADMIN_TOKEN", "test-admin-token-123")
+def test_admin_list_devices_authorized_by_google_token(client, mocker):
+    """Varmistaa, että /admin/devices toimii validilla Google OAuth -Bearer-tokenilla."""
+    mocker.patch("app.admin._verify_google_oauth_token", return_value="jaakko.korhonen@gmail.com")
 
     response = client.get(
         "/admin/devices",
-        headers={"Authorization": "Bearer test-admin-token-123"},
+        headers={"Authorization": "Bearer valid-google-id-token"},
     )
     assert response.status_code == 200
     assert len(response.json["devices"]) == 2
@@ -37,8 +37,7 @@ def test_admin_list_devices_authorized_by_admin_token(client, mocker):
 
 
 def test_admin_list_devices_invalid_bearer_token(client, mocker):
-    """Varmistaa, että väärä Bearer-token palauttaa 401 (ei Google-token, ei ADMIN_TOKEN)."""
-    mocker.patch("app.admin.ADMIN_TOKEN", "test-admin-token-123")
+    """Varmistaa, että väärä Bearer-token palauttaa 401."""
     mocker.patch("app.admin._verify_google_oauth_token", return_value=None)
 
     response = client.get(
@@ -141,7 +140,6 @@ def test_admin_google_oauth_token_authorized(client, mocker):
 
 def test_admin_google_oauth_token_pending(client, mocker):
     """Google OAuth ID Token + Firestore-status 'pending' → 403."""
-    mocker.patch("app.admin.ADMIN_TOKEN", "")   # ei ADMIN_TOKEN -matchausta
     mocker.patch("app.admin._verify_google_oauth_token", return_value="newuser@example.com")
     mocker.patch("app.admin.upsert_user", return_value={
         "email": "newuser@example.com", "status": "pending"
@@ -157,7 +155,6 @@ def test_admin_google_oauth_token_pending(client, mocker):
 
 def test_admin_google_oauth_token_denied(client, mocker):
     """Google OAuth ID Token + Firestore-status 'denied' → 403."""
-    mocker.patch("app.admin.ADMIN_TOKEN", "")
     mocker.patch("app.admin._verify_google_oauth_token", return_value="blocked@example.com")
     mocker.patch("app.admin.upsert_user", return_value={
         "email": "blocked@example.com", "status": "denied"

@@ -10,10 +10,9 @@ Endpointit:
   POST /admin/users/<email>/deny             — evää käyttäjän pääsypyyntö
 
 Autentikaatio:
-  - IAP: X-Goog-IAP-JWT-Assertion
   - Google OAuth ID Token: Authorization: Bearer <google_id_token>
-  - Admin Token: Authorization: Bearer <ADMIN_TOKEN>
-  Lisäksi Google OAuth -käyttäjät tarkistetaan Firestoren users-kokoelmasta.
+  - IAP: X-Goog-IAP-JWT-Assertion
+  Kaikki Google OAuth -käyttäjät tarkistetaan Firestoren users-kokoelmasta (OIDC SSO luvitus).
 
 Security note: require_auth verifioi X-Goog-IAP-JWT-Assertion kryptografisesti
 google-auth-kirjastolla (id_token.verify_token). Pelkkä header-tarkistus ei riitä —
@@ -54,12 +53,6 @@ logger = logging.getLogger(__name__)
 # Aseta Cloud Runin ympäristömuuttujaan IAP_AUDIENCE.
 # Löydät arvon: gcloud iap web describe --resource-type=backend-services
 IAP_AUDIENCE = os.environ.get("IAP_AUDIENCE", "")
-
-# Fallback-token skriptikäyttöön (CI, curl-testit).
-# Jos ADMIN_TOKEN on asetettu, se hyväksytään IAP-tarkistuksen ohella.
-# NOTE: Aseta vahva (>= 32 merkkiä) satunnainen arvo, esim:
-#   openssl rand -base64 32 | gcloud secrets create falko-admin-token --data-file=-
-ADMIN_TOKEN  = os.environ.get("ADMIN_TOKEN", "")
 
 # Sallitut MDM command_type -arvot.
 # Allowlist estää mielivaltaisten RequestType-arvojen injektoinnin Apple-protokollaan.
@@ -147,12 +140,12 @@ def _check_user_access(email: str) -> tuple[bool, str, int]:
 
 
 def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
-    """Dekoraattori: autentikoi pyyntö IAP JWT:llä, Google OAuth tokenilla tai ADMIN_TOKENilla.
+    """Dekoraattori: autentikoi pyyntö IAP JWT:llä tai Google OAuth ID Tokenilla.
 
     Hyväksyntäjärjestys:
       1. IAP: verifioi X-Goog-IAP-JWT-Assertion kryptografisesti.
-      2. Bearer token: Authorization: Bearer <GOOGLE_OAUTH_ID_TOKEN> tai <ADMIN_TOKEN>.
-         Google-tokenille tarkistetaan myös Firestoren luvitusstatus.
+      2. Bearer token: Authorization: Bearer <GOOGLE_OAUTH_ID_TOKEN>.
+         Käyttäjälle tarkistetaan aina Firestoren luvitusstatus.
 
     Jos autentikointi ei onnistu, palautetaan 401. Jos käyttäjä on tunnettu
     mutta ei vielä hyväksytty, palautetaan 403 + kuvaus.
@@ -176,16 +169,12 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
                 return jsonify({"error": reason}), code
             return f(*args, **kwargs)
 
-        # --- Vaihtoehto 2: Authorization Header ---
+        # --- Vaihtoehto 2: Authorization Header (Google OAuth ID Token) ---
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header.split(" ")[1]
 
-            # 2a. Perinteinen ADMIN_TOKEN (skriptit, CI)
-            if ADMIN_TOKEN and token == ADMIN_TOKEN:
-                return f(*args, **kwargs)
-
-            # 2b. Google OAuth ID Token — verifioi + tarkista luvitusstatus
+            # Google OAuth ID Token — verifioi + tarkista luvitusstatus
             email = _verify_google_oauth_token(token)
             if email:
                 allowed, reason, code = _check_user_access(email)
