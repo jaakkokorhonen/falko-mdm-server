@@ -1,19 +1,23 @@
-# ============================================================
-# main.tf — Falko MDM -palvelimen GCP-pääresurssit
+# ==============================================================================
+# main.tf — Falko MDM Backend — Cloud Run & GCP -infrastruktuurin päämääritelmät
 #
-# Sisältää:
-#   - Firestore-tietokanta + varmuuskopiointi
-#   - Secret Manager APNs-avaimelle
-#   - Service Account + IAM-oikeudet
-#   - Cloud Run -palvelu (ympäristömuuttujat, VPC-liitäntä)
-#   - Cloud Run Domain Mapping (mdm-api.falko.fi)
-#   - BigQuery audit-loki + Log Router Sink
+# Arkkitehtuuri, Tietoturva & IaC-periaatteet:
+#   1. Infrastructure as Code (IaC First): Kaikki pilviresurssit (Cloud Run v2, Firestore Native,
+#      Secret Manager, IAM-roolit, BigQuery Audit Logging, Domain Mappings) hallitaan
+#      yksinomaan tässä koodikannassa.
+#   2. Zero-Trust & 100% Google OIDC Auth: Palvelimella ei ole kiinteitä salasanoja tai Admin Tokens -avaimia.
+#      Kaikki hallinta-endpointit (`/admin/*`) suojataan sovellustasolla (`app/admin.py`) vahvistamalla
+#      kryptografisesti Google OAuth ID Token ja Firestore `users/{email}` luvitus.
+#   3. Principle of Least Privilege: Cloud Run ajetaan omalla Service Accountilla (`falko-mdm-run-sa`),
+#      jolle myönnetään vain minimitason IAM-oikeudet (Secret Accessor, Datastore User, Log Writer).
+#   4. Pysyvä MDM-tietovarasto: Firestore toimii ainoana datavarastona laite- ja komento-entiteeteille,
+#      varustettuna Point-In-Time-Recovery (PITR) -toiminnolla ja päivittäisillä varmuuskopioilla.
 #
 # Riippuvuudet:
-#   network.tf  — VPC Connector (google_vpc_access_connector.connector)
-#   security.tf — Cloud Armor -käytäntö (google_compute_security_policy.rate_limit_policy)
-#   variables.tf — kaikki var.* -viittaukset
-# ============================================================
+#   network.tf  — VPC Access Connector (google_vpc_access_connector.connector)
+#   security.tf — Cloud Armor -tietoturvakäytäntö (google_compute_security_policy.rate_limit_policy)
+#   variables.tf — Kaikki var.* -muuttujat ja ympäristöasetukset
+# ==============================================================================
 
 # ------------------------------------------------------------
 # Firestore-tietokanta
@@ -24,8 +28,8 @@
 # Importoi olemassaoleva tietokanta komennolla:
 #   terraform import google_firestore_database.database "(default)"
 resource "google_firestore_database" "database" {
-  project  = var.gcp_project_id
-  name     = "(default)"
+  project = var.gcp_project_id
+  name    = "(default)"
 
   # europe-west3 = Frankfurt. Valittu koska Firestore ei tue europe-north1:tä
   # (Firestoren aluevalinta on rajoitettu — katso GCP-dokumentaatio).

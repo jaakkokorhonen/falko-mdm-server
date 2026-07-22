@@ -123,11 +123,11 @@ resource "google_monitoring_alert_policy" "apns_expiry_alert" {
     display_name = "APNs Expiry Log Count > 0"
     condition_threshold {
       filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.apns_expiry_warning.name}\" AND resource.type=\"cloud_run_revision\""
-      duration        = "60s"  # Hälytys laukaisee 60 sekunnin jälkeen kun ehto on täyttynyt
+      duration        = "60s" # Hälytys laukaisee 60 sekunnin jälkeen kun ehto on täyttynyt
       comparison      = "COMPARISON_GT"
-      threshold_value = 0      # Yksikin varoitusloki riittää hälyttämään
+      threshold_value = 0 # Yksikin varoitusloki riittää hälyttämään
       trigger {
-        count = 1              # Yksi datapiste riittää laukaisemaan
+        count = 1 # Yksi datapiste riittää laukaisemaan
       }
       aggregations {
         alignment_period   = "60s"
@@ -155,7 +155,7 @@ resource "google_monitoring_alert_policy" "server_error_alert" {
       filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.server_errors.name}\" AND resource.type=\"cloud_run_revision\""
       duration        = "60s"
       comparison      = "COMPARISON_GT"
-      threshold_value = 5      # > 5 virhettä 60 sekunnin mittausikkunassa
+      threshold_value = 5 # > 5 virhettä 60 sekunnin mittausikkunassa
       trigger {
         count = 1
       }
@@ -189,7 +189,7 @@ resource "google_monitoring_alert_policy" "auth_failure_alert" {
       filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.auth_failures.name}\" AND resource.type=\"cloud_run_revision\""
       duration        = "60s"
       comparison      = "COMPARISON_GT"
-      threshold_value = 2      # > 2 auth-epäonnistumista 60 sekunnin ikkunassa
+      threshold_value = 2 # > 2 auth-epäonnistumista 60 sekunnin ikkunassa
       trigger {
         count = 1
       }

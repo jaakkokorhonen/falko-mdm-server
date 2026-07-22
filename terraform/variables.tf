@@ -138,4 +138,3 @@ variable "cloud_armor_rate_limit_window_sec" {
   default     = 60
   # 60 sekuntia = 1 minuutti. Vastaa sovelluskerroksen _RATE_LIMIT_WINDOW-vakiota (middleware.py).
 }
-}
