@@ -1,0 +1,29 @@
+{
+  "ruleName": "Internal Classification Rule",
+  "displayName": "Sisäinen (Internal) - Estä ulkoinen jako",
+  "description": "Estää tiedostojen jakamisen organisaation ulkopuolelle, jos tiedostossa on Internal-luokittelu.",
+  "severity": "MEDIUM",
+  "scanSources": [
+    "DRIVE_SHARE"
+  ],
+  "conditions": [
+    {
+      "labelCondition": {
+        "labelId": "labels/internal_label_id",
+        "operator": "EXISTS"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "blockAction": {
+        "customErrorMessage": "Tämä tiedosto on merkitty Sisäiseksi (Internal). Jakaminen organisaation ulkopuolelle on estetty."
+      }
+    },
+    {
+      "auditAction": {
+        "sendAlert": false
+      }
+    }
+  ]
+}

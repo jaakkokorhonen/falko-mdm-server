@@ -1,0 +1,45 @@
+{
+  "ruleName": "Personal Data Classification Rule",
+  "displayName": "Henkilötieto (Personal Data) - Automaattinen suojaus",
+  "description": "Estää henkilötietoja sisältävien tai kyseisellä labelilla merkittyjen tiedostojen jakamisen ulkopuolelle.",
+  "severity": "HIGH",
+  "scanSources": [
+    "DRIVE_SHARE"
+  ],
+  "conditions": [
+    {
+      "orConditions": [
+        {
+          "labelCondition": {
+            "labelId": "labels/personal_data_label_id",
+            "operator": "EXISTS"
+          }
+        },
+        {
+          "contentCondition": {
+            "detectorType": "FINNISH_SOCIAL_SECURITY_NUMBER",
+            "operator": "CONTAINS"
+          }
+        },
+        {
+          "contentCondition": {
+            "detectorType": "CREDIT_CARD_NUMBER",
+            "operator": "CONTAINS"
+          }
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "blockAction": {
+        "customErrorMessage": "Tiedosto sisältää henkilötietoja tai se on luokiteltu Henkilötiedoksi (Personal Data). Jako ulkopuolelle estetty tietosuojasyistä."
+      }
+    },
+    {
+      "auditAction": {
+        "sendAlert": true
+      }
+    }
+  ]
+}

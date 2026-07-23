@@ -1,0 +1,32 @@
+{
+  "ruleName": "Confidential Classification Rule",
+  "displayName": "Luottamuksellinen (Confidential) - Tiukka jakoesto",
+  "description": "Estää tiedostojen jakamisen organisaation ulkopuolelle ja antaa hälytyksen, jos tiedostossa on Confidential-luokittelu.",
+  "severity": "HIGH",
+  "scanSources": [
+    "DRIVE_SHARE",
+    "DRIVE_DOWNLOAD",
+    "DRIVE_PRINT",
+    "DRIVE_COPY"
+  ],
+  "conditions": [
+    {
+      "labelCondition": {
+        "labelId": "labels/confidential_label_id",
+        "operator": "EXISTS"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "blockAction": {
+        "customErrorMessage": "Tiedosto on merkitty Luottamukselliseksi (Confidential). Jakaminen ja lataaminen organisaation ulkopuolelle on estetty."
+      }
+    },
+    {
+      "auditAction": {
+        "sendAlert": true
+      }
+    }
+  ]
+}

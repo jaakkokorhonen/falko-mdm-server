@@ -1,0 +1,33 @@
+{
+  "ruleName": "Customer Confidential Classification Rule",
+  "displayName": "Asiakasluottamuksellinen (Customer Confidential) - Sallittu vain kumppaneille",
+  "description": "Estää jakamisen paitsi erikseen sallituille asiakas-domaineille, jos tiedostossa on Customer Confidential -luokittelu.",
+  "severity": "HIGH",
+  "scanSources": [
+    "DRIVE_SHARE"
+  ],
+  "conditions": [
+    {
+      "labelCondition": {
+        "labelId": "labels/customer_confidential_label_id",
+        "operator": "EXISTS"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "blockAction": {
+        "customErrorMessage": "Tiedosto on merkitty Asiakasluottamukselliseksi (Customer Confidential). Jakaminen on sallittu vain määritetyille kumppanidomaineille.",
+        "exceptionDomains": [
+          "approved-customer.com",
+          "falko.fi"
+        ]
+      }
+    },
+    {
+      "auditAction": {
+        "sendAlert": true
+      }
+    }
+  ]
+}

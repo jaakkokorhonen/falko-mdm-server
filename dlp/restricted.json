@@ -1,0 +1,35 @@
+{
+  "ruleName": "Restricted Classification Rule",
+  "displayName": "Rajoitettu (Restricted) - Tiukin jakoesto",
+  "description": "Estää jakamisen kaikille paitsi erikseen määritetylle ydinryhmälle, jos tiedostossa on Restricted-luokittelu.",
+  "severity": "CRITICAL",
+  "scanSources": [
+    "DRIVE_SHARE",
+    "DRIVE_DOWNLOAD",
+    "DRIVE_PRINT",
+    "DRIVE_COPY"
+  ],
+  "conditions": [
+    {
+      "labelCondition": {
+        "labelId": "labels/restricted_label_id",
+        "operator": "EXISTS"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "blockAction": {
+        "customErrorMessage": "Tiedosto on merkitty Rajoitetuksi (Restricted). Kaikki jakaminen ja lataaminen on estetty paitsi erikseen sallituilta ydinryhmiltä.",
+        "exceptionGroups": [
+          "restricted-access-core@falko.fi"
+        ]
+      }
+    },
+    {
+      "auditAction": {
+        "sendAlert": true
+      }
+    }
+  ]
+}

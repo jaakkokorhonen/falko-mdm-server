@@ -1,0 +1,25 @@
+{
+  "ruleName": "Public Classification Rule",
+  "displayName": "Julkinen (Public) - Ei rajoituksia",
+  "description": "Sallii julkisen jakamisen tiedostoille, joissa on Public-luokittelu.",
+  "severity": "LOW",
+  "scanSources": [
+    "DRIVE_SHARE",
+    "DRIVE_DOWNLOAD",
+    "DRIVE_PRINT",
+    "DRIVE_COPY"
+  ],
+  "conditions": [
+    {
+      "labelCondition": {
+        "labelId": "labels/public_label_id",
+        "operator": "EXISTS"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "allowAction": {}
+    }
+  ]
+}

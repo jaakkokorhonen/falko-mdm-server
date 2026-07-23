@@ -1,0 +1,106 @@
+{
+  "retentionRules": [
+    {
+      "ruleType": "DEFAULT",
+      "service": "DRIVE",
+      "displayName": "Oletussäilytys - Julkinen (Public)",
+      "retentionPolicy": {
+        "action": "KEEP_INDEFINITELY"
+      }
+    },
+    {
+      "ruleType": "CUSTOM",
+      "service": "DRIVE",
+      "displayName": "Sisäinen (Internal) Säilytys",
+      "conditions": {
+        "driveLabelCondition": {
+          "labelId": "labels/internal_label_id"
+        }
+      },
+      "retentionPolicy": {
+        "action": "KEEP_AND_PURGE",
+        "retentionDuration": {
+          "unit": "YEARS",
+          "value": 3
+        },
+        "startEvent": "LAST_MODIFIED"
+      }
+    },
+    {
+      "ruleType": "CUSTOM",
+      "service": "DRIVE",
+      "displayName": "Luottamuksellinen (Confidential) Säilytys",
+      "conditions": {
+        "driveLabelCondition": {
+          "labelId": "labels/confidential_label_id"
+        }
+      },
+      "retentionPolicy": {
+        "action": "KEEP_AND_PURGE",
+        "retentionDuration": {
+          "unit": "YEARS",
+          "value": 5
+        },
+        "startEvent": "LAST_MODIFIED"
+      }
+    },
+    {
+      "ruleType": "CUSTOM",
+      "service": "DRIVE",
+      "displayName": "Asiakasluottamuksellinen Säilytys",
+      "conditions": {
+        "driveLabelCondition": {
+          "labelId": "labels/customer_confidential_label_id"
+        }
+      },
+      "retentionPolicy": {
+        "action": "PURGE_AFTER_DURATION",
+        "retentionDuration": {
+          "unit": "DAYS",
+          "value": 30
+        },
+        "startEvent": "PROJECT_CLOSED_EVENT"
+      }
+    },
+    {
+      "ruleType": "CUSTOM",
+      "service": "DRIVE",
+      "displayName": "Henkilötietojen (Personal Data) Säilytys",
+      "conditions": {
+        "driveLabelCondition": {
+          "labelId": "labels/personal_data_label_id"
+        }
+      },
+      "retentionPolicy": {
+        "action": "KEEP_AND_PURGE",
+        "retentionDuration": {
+          "unit": "YEARS",
+          "value": 2
+        },
+        "startEvent": "LAST_MODIFIED"
+      }
+    },
+    {
+      "ruleType": "CUSTOM",
+      "service": "DRIVE",
+      "displayName": "Rajoitettu (Restricted) Säilytys",
+      "conditions": {
+        "driveLabelCondition": {
+          "labelId": "labels/restricted_label_id"
+        }
+      },
+      "retentionPolicy": {
+        "action": "KEEP_AND_PURGE",
+        "retentionDuration": {
+          "unit": "YEARS",
+          "value": 1
+        },
+        "startEvent": "LAST_MODIFIED"
+      }
+    }
+  ],
+  "conflictResolutionRules": {
+    "conflictingCustomRules": "LONGEST_DURATION_WINS",
+    "holdsOverrideRetention": true
+  }
+}
