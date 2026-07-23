@@ -73,15 +73,15 @@
       "translations": {
         "en": {
           "displayName": "Personal Data",
-          "description": "Regulated personal data, rights apply."
+          "description": "Regulated personal data, GDPR rights apply."
         },
         "fi": {
           "displayName": "Henkilötieto",
-          "description": "Säänneltyä henkilötietoa (GDPR-alainen data)."
+          "description": "Säänneltyä, GDPR alaista henkilötietoa."
         },
         "sv": {
           "displayName": "Personuppgifter",
-          "description": "Reglerad persondata, rättigheter gäller."
+          "description": "Reglerad persondata, GDPR rättigheter gäller."
         }
       }
     },
