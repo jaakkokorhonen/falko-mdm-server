@@ -1,7 +1,7 @@
 {
   "ruleName": "Public Classification Rule",
-  "displayName": "Julkinen (Public) - Ei rajoituksia",
-  "description": "Sallii julkisen jakamisen tiedostoille, joissa on Public-luokittelu.",
+  "displayName": "Public - No Restrictions",
+  "description": "Allows public sharing for files classified as Public.",
   "severity": "LOW",
   "scanSources": [
     "DRIVE_SHARE",

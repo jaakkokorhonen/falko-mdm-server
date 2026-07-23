@@ -3,7 +3,7 @@
     {
       "ruleType": "DEFAULT",
       "service": "DRIVE",
-      "displayName": "Oletussäilytys - Julkinen (Public)",
+      "displayName": "Default Retention - Public",
       "retentionPolicy": {
         "action": "KEEP_INDEFINITELY"
       }
@@ -11,7 +11,7 @@
     {
       "ruleType": "CUSTOM",
       "service": "DRIVE",
-      "displayName": "Sisäinen (Internal) Säilytys",
+      "displayName": "Internal Retention",
       "conditions": {
         "driveLabelCondition": {
           "labelId": "labels/internal_label_id"
@@ -29,7 +29,7 @@
     {
       "ruleType": "CUSTOM",
       "service": "DRIVE",
-      "displayName": "Luottamuksellinen (Confidential) Säilytys",
+      "displayName": "Confidential Retention",
       "conditions": {
         "driveLabelCondition": {
           "labelId": "labels/confidential_label_id"
@@ -47,7 +47,7 @@
     {
       "ruleType": "CUSTOM",
       "service": "DRIVE",
-      "displayName": "Asiakasluottamuksellinen Säilytys",
+      "displayName": "Customer Confidential Retention",
       "conditions": {
         "driveLabelCondition": {
           "labelId": "labels/customer_confidential_label_id"
@@ -65,7 +65,7 @@
     {
       "ruleType": "CUSTOM",
       "service": "DRIVE",
-      "displayName": "Henkilötietojen (Personal Data) Säilytys",
+      "displayName": "Personal Data Retention",
       "conditions": {
         "driveLabelCondition": {
           "labelId": "labels/personal_data_label_id"
@@ -83,7 +83,7 @@
     {
       "ruleType": "CUSTOM",
       "service": "DRIVE",
-      "displayName": "Rajoitettu (Restricted) Säilytys",
+      "displayName": "Restricted Retention",
       "conditions": {
         "driveLabelCondition": {
           "labelId": "labels/restricted_label_id"
