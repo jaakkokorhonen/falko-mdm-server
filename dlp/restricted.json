@@ -1,7 +1,7 @@
 {
   "ruleName": "Restricted Classification Rule",
-  "displayName": "Rajoitettu (Restricted) - Tiukin jakoesto",
-  "description": "Estää jakamisen kaikille paitsi erikseen määritetylle ydinryhmälle, jos tiedostossa on Restricted-luokittelu.",
+  "displayName": "Restricted - Core Access Only",
+  "description": "Blocks sharing and downloads for Restricted files except for the authorized core group.",
   "severity": "CRITICAL",
   "scanSources": [
     "DRIVE_SHARE",
@@ -20,7 +20,7 @@
   "actions": [
     {
       "blockAction": {
-        "customErrorMessage": "Tiedosto on merkitty Rajoitetuksi (Restricted). Kaikki jakaminen ja lataaminen on estetty paitsi erikseen sallituilta ydinryhmiltä.",
+        "customErrorMessage": "This file is marked as Restricted. All sharing, downloading, printing, and copying are blocked except for the authorized core group.",
         "exceptionGroups": [
           "restricted-access-core@falko.fi"
         ]

@@ -1,7 +1,7 @@
 {
   "ruleName": "Personal Data Classification Rule",
-  "displayName": "Henkilötieto (Personal Data) - Automaattinen suojaus",
-  "description": "Estää henkilötietoja sisältävien tai kyseisellä labelilla merkittyjen tiedostojen jakamisen ulkopuolelle.",
+  "displayName": "Personal Data - External Block",
+  "description": "Blocks external sharing of files containing personal data or marked with the Personal Data label.",
   "severity": "HIGH",
   "scanSources": [
     "DRIVE_SHARE"
@@ -33,7 +33,7 @@
   "actions": [
     {
       "blockAction": {
-        "customErrorMessage": "Tiedosto sisältää henkilötietoja tai se on luokiteltu Henkilötiedoksi (Personal Data). Jako ulkopuolelle estetty tietosuojasyistä."
+        "customErrorMessage": "This file contains personal data or is classified as Personal Data. External sharing is blocked for data privacy compliance."
       }
     },
     {

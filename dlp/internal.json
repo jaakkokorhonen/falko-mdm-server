@@ -1,7 +1,7 @@
 {
   "ruleName": "Internal Classification Rule",
-  "displayName": "Sisäinen (Internal) - Estä ulkoinen jako",
-  "description": "Estää tiedostojen jakamisen organisaation ulkopuolelle, jos tiedostossa on Internal-luokittelu.",
+  "displayName": "Internal - Block External Sharing",
+  "description": "Prevents sharing files outside the organization if marked as Internal.",
   "severity": "MEDIUM",
   "scanSources": [
     "DRIVE_SHARE"
@@ -17,7 +17,7 @@
   "actions": [
     {
       "blockAction": {
-        "customErrorMessage": "Tämä tiedosto on merkitty Sisäiseksi (Internal). Jakaminen organisaation ulkopuolelle on estetty."
+        "customErrorMessage": "This file is marked as Internal. Sharing outside the organization is blocked."
       }
     },
     {

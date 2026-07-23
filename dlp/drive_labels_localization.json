@@ -1,0 +1,106 @@
+{
+  "labels": [
+    {
+      "id": "public",
+      "translations": {
+        "en": {
+          "displayName": "Public",
+          "description": "Freely shareable, no restrictions apply."
+        },
+        "fi": {
+          "displayName": "Julkinen",
+          "description": "Vapaasti jaettavissa, ei rajoituksia."
+        },
+        "sv": {
+          "displayName": "Offentlig",
+          "description": "Fritt delbar, inga restriktioner gäller."
+        }
+      }
+    },
+    {
+      "id": "internal",
+      "translations": {
+        "en": {
+          "displayName": "Internal",
+          "description": "Company use, not externally shared."
+        },
+        "fi": {
+          "displayName": "Sisäinen",
+          "description": "Vain yrityksen sisäiseen käyttöön, ei jaeta ulkopuolisille."
+        },
+        "sv": {
+          "displayName": "Intern",
+          "description": "För internt bruk, delas inte externt."
+        }
+      }
+    },
+    {
+      "id": "confidential",
+      "translations": {
+        "en": {
+          "displayName": "Confidential",
+          "description": "Sensitive company data, NDA-protected."
+        },
+        "fi": {
+          "displayName": "Luottamuksellinen",
+          "description": "Herkkää yritysdataa, suojattu salassapitosopimuksella (NDA)."
+        },
+        "sv": {
+          "displayName": "Konfidentiell",
+          "description": "Känsliga företagsuppgifter, skyddade av sekretessavtal (NDA)."
+        }
+      }
+    },
+    {
+      "id": "customer_confidential",
+      "translations": {
+        "en": {
+          "displayName": "Customer Confidential",
+          "description": "Customer-owned, contract-governed data."
+        },
+        "fi": {
+          "displayName": "Asiakasluottamuksellinen",
+          "description": "Asiakkaan omistamaa, sopimuksella suojattua dataa."
+        },
+        "sv": {
+          "displayName": "Kundkonfidentiell",
+          "description": "Kundägd, avtalsreglerad data."
+        }
+      }
+    },
+    {
+      "id": "personal_data",
+      "translations": {
+        "en": {
+          "displayName": "Personal Data",
+          "description": "Regulated personal data, rights apply."
+        },
+        "fi": {
+          "displayName": "Henkilötieto",
+          "description": "Säänneltyä henkilötietoa (GDPR-alainen data)."
+        },
+        "sv": {
+          "displayName": "Personuppgifter",
+          "description": "Reglerad persondata, rättigheter gäller."
+        }
+      }
+    },
+    {
+      "id": "restricted",
+      "translations": {
+        "en": {
+          "displayName": "Restricted",
+          "description": "Highest risk, strictly need-to-know."
+        },
+        "fi": {
+          "displayName": "Rajoitettu",
+          "description": "Korkeimman riskin tieto, tiukasti vain nimetyille henkilöille."
+        },
+        "sv": {
+          "displayName": "Begränsad",
+          "description": "Högsta risk, strikt behovsbaserad information."
+        }
+      }
+    }
+  ]
+}

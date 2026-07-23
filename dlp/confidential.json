@@ -1,7 +1,7 @@
 {
   "ruleName": "Confidential Classification Rule",
-  "displayName": "Luottamuksellinen (Confidential) - Tiukka jakoesto",
-  "description": "Estää tiedostojen jakamisen organisaation ulkopuolelle ja antaa hälytyksen, jos tiedostossa on Confidential-luokittelu.",
+  "displayName": "Confidential - Strict External Block",
+  "description": "Blocks sharing, downloading, copying, and printing outside the organization for Confidential files.",
   "severity": "HIGH",
   "scanSources": [
     "DRIVE_SHARE",
@@ -20,7 +20,7 @@
   "actions": [
     {
       "blockAction": {
-        "customErrorMessage": "Tiedosto on merkitty Luottamukselliseksi (Confidential). Jakaminen ja lataaminen organisaation ulkopuolelle on estetty."
+        "customErrorMessage": "This file is marked as Confidential. External sharing, downloading, copying, and printing are blocked."
       }
     },
     {
