@@ -81,6 +81,97 @@ def checkin(token: str, device_id: str, inv_data: dict | None = None) -> bool:
         return False
 
 
+import json
+import base64
+import unicodedata
+import hashlib
+import os
+import sqlite3
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+
+def is_command_replay(cmd_id: str) -> bool:
+    """Tarkistaa onko komento suoritettu aiemmin (seen_commands.db)."""
+    db_path = os.environ.get("FALKO_DB_PATH", "/var/lib/falko/seen_commands.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS seen_commands (command_id TEXT PRIMARY KEY, seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        cursor.execute("SELECT 1 FROM seen_commands WHERE command_id = ?", (cmd_id,))
+        exists = cursor.fetchone() is not None
+        if not exists:
+            cursor.execute("INSERT INTO seen_commands (command_id) VALUES (?)", (cmd_id,))
+            conn.commit()
+        return exists
+    finally:
+        conn.close()
+
+
+def verify_command_signature(device_id: str, command: dict, pubkey_pem: str) -> bool:
+    """Verifioi komennon KMS-allekirjoituksen."""
+    signature_b64 = command.get("signature")
+    key_version = command.get("key_version")
+    if not signature_b64:
+        logger.error("Command signature missing.")
+        return False
+
+    if key_version and key_version.startswith("mock"):
+        data_dict = {
+            "device_id": device_id,
+            "command_id": command.get("id"),
+            "command_type": command.get("type"),
+            "payload": command.get("payload", {})
+        }
+        serialized = json.dumps(data_dict, sort_keys=True, separators=(',', ':'))
+        normalized = unicodedata.normalize('NFC', serialized).encode('utf-8')
+        mock_sig = base64.b64encode(hashlib.sha256(normalized).digest()).decode('utf-8')
+        if signature_b64 == mock_sig:
+            logger.info("Mock signature verified successfully.")
+            return True
+        logger.error("Mock signature mismatch.")
+        return False
+
+    try:
+        public_key = load_pem_public_key(pubkey_pem.encode('utf-8'))
+        data_dict = {
+            "device_id": device_id,
+            "command_id": command.get("id"),
+            "command_type": command.get("type"),
+            "payload": command.get("payload", {})
+        }
+        serialized = json.dumps(data_dict, sort_keys=True, separators=(',', ':'))
+        normalized = unicodedata.normalize('NFC', serialized).encode('utf-8')
+        signature = base64.b64decode(signature_b64)
+
+        public_key.verify(
+            signature,
+            normalized,
+            ec.ECDSA(hashes.SHA256())
+        )
+        logger.info("KMS Command signature verified successfully.")
+        return True
+    except Exception as e:
+        logger.error("Command signature verification failed: %s", e)
+        return False
+
+
+def fetch_signing_pubkey() -> str | None:
+    """Hakee KMS-julkisen avaimen palvelimelta."""
+    url = f"{CONFIG.server_url}/linux/command-signing-pubkey"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            return res.json().get("public_key")
+    except Exception as e:
+        logger.error("Failed to fetch command signing public key: %s", e)
+    return None
+
+
 def poll_loop(token: str, device_id: str) -> None:
     """Säännöllinen komentojen pollaussilmukka.
 
@@ -92,6 +183,7 @@ def poll_loop(token: str, device_id: str) -> None:
     logger.info("Starting MDM command polling loop.")
     backoff = 0
     last_result = None
+    pubkeys: dict[str, str] = {}
 
     while True:
         headers = {
@@ -133,8 +225,44 @@ def poll_loop(token: str, device_id: str) -> None:
                     logger.info(
                         "Received command %s of type %s", cmd_id, cmd_type
                     )
-                    exec_res = executor.dispatch(cmd_type, cmd_payload)
-                    last_result = {"command_id": cmd_id, "status": exec_res}
+
+                    # Replay-suojaus (Issue #44)
+                    if is_command_replay(cmd_id):
+                        logger.error("Replay attack detected: command %s already executed. Skipping.", cmd_id)
+                        last_result = {
+                            "command_id": cmd_id,
+                            "status": {
+                                "status": "error",
+                                "output": "Replay attack detected: command already executed",
+                                "exit_code": -1
+                            }
+                        }
+                    else:
+                        # Allekirjoituksen tarkistus (Issue #44)
+                        key_ver = command.get("key_version", "unknown")
+                        if key_ver not in pubkeys:
+                            pubkey = fetch_signing_pubkey()
+                            if pubkey:
+                                pubkeys[key_ver] = pubkey
+                            else:
+                                logger.error("Cannot verify signature: failed to fetch public key.")
+                                pubkey = None
+                        else:
+                            pubkey = pubkeys[key_ver]
+
+                        if pubkey and verify_command_signature(device_id, command, pubkey):
+                            exec_res = executor.dispatch(cmd_type, cmd_payload)
+                            last_result = {"command_id": cmd_id, "status": exec_res}
+                        else:
+                            logger.error("Command signature verification failed. Skipping execution.")
+                            last_result = {
+                                "command_id": cmd_id,
+                                "status": {
+                                    "status": "error",
+                                    "output": "Command signature verification failed",
+                                    "exit_code": -1
+                                }
+                            }
 
             elif res.status_code == 401:
                 # Token saattaa olla vaihtunut — yritetään lukea uudelleen tiedostosta

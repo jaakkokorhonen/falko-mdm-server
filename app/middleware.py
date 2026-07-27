@@ -13,6 +13,7 @@ Rate limiting:
   jos Cloud Run skaalaa useampaan instanssiin.
   Ref: Fielding & Reschke (2022) RFC 9110 §15.5.30 (429 Too Many Requests).
   Ref: OWASP API Security Top 10 (2023) API4:2023 Unrestricted Resource Consumption.
+"""
 import time
 import threading
 import logging
