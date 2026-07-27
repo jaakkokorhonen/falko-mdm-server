@@ -31,14 +31,20 @@ from .db import (
 )
 from datetime import datetime, timezone
 import secrets
-from .linux_common import require_linux_device, KMS_KEY_PATH, hash_token
+from .linux_common import (
+    require_linux_device,
+    KMS_KEY_PATH,
+    hash_token,
+    TOKEN_GRACE_PERIOD_SECONDS,
+    TOKEN_ROTATION_DAYS,
+)
 
 linux_mdm_bp = Blueprint("linux_mdm", __name__)
 logger = logging.getLogger(__name__)
 
 SERVER_AGENT_VERSION = os.environ.get("FALKO_LATEST_AGENT_VERSION", "0.1.0")
 
-_GRACE_PERIOD_SECONDS = 24 * 3600  # 24 h
+_TOKEN_ROTATION_SECONDS = TOKEN_ROTATION_DAYS * 24 * 3600
 
 
 @linux_mdm_bp.put("/linux/mdm/<device_id>")
@@ -49,54 +55,52 @@ def linux_mdm(device_id: str):
     # ISO 27001 Audit Evidence: Laitteen aktiivisuuden seuranta.
     upsert_linux_device(device_id, {"last_seen": firestore.SERVER_TIMESTAMP})
 
-    # Tarkistetaan rotaatiotarve (Issue #58)
     device = g.device
     token_issued_at = device.get("token_issued_at")
     pending_token_hash = device.get("pending_token_hash")
-    rotation_started_at = device.get("rotation_started_at")
+    pending_token_issued_at = device.get("pending_token_issued_at")
+    rotation_requested = device.get("rotation_requested", False)
 
     new_token_plaintext = None
     now = datetime.now(timezone.utc)
 
-    # --- Grace period -invalidaatio (#58) ---
-    # Jos rotation_started_at on yli 24 h vanha eikä agentti ole kuittannut
-    # uutta tokenia, rotaatio on epäonnistunut. Merkitään laite token_rotation_failed
-    # -tilaan ja poistetaan pending-token. Cloud Monitoring hälyttää tästä tilasta.
-    # HUOM: Varmistetaan, ettei pending_token_hash ole valeluku "rotate"
-    if pending_token_hash and pending_token_hash != "rotate" and rotation_started_at:
-        if rotation_started_at.tzinfo is None:
-            rotation_started_at = rotation_started_at.replace(tzinfo=timezone.utc)
-        age = (now - rotation_started_at).total_seconds()
-        if age > _GRACE_PERIOD_SECONDS:
+    # --- Grace period -invalidaatio (Issue #58) ---
+    # Jos pending_token_issued_at on yli TOKEN_GRACE_PERIOD_SECONDS vanha eikä agentti
+    # ole kuittannut uutta tokenia, rotaatio on epäonnistunut. Merkitään laite
+    # token_rotation_failed -tilaan. Cloud Monitoring hälyttää tästä tilasta.
+    if pending_token_hash and pending_token_issued_at:
+        if pending_token_issued_at.tzinfo is None:
+            pending_token_issued_at = pending_token_issued_at.replace(tzinfo=timezone.utc)
+        age = (now - pending_token_issued_at).total_seconds()
+        if age > TOKEN_GRACE_PERIOD_SECONDS:
             logger.error(
                 "Token rotation grace period expired for device %s — marking token_rotation_failed",
                 device_id,
             )
             upsert_linux_device(device_id, {
                 "pending_token_hash": None,
-                "rotation_started_at": None,
+                "pending_token_issued_at": None,
                 "token_rotation_failed": True,
             })
             device["pending_token_hash"] = None
-            device["rotation_started_at"] = None
+            device["pending_token_issued_at"] = None
             pending_token_hash = None
-            rotation_started_at = None
+            pending_token_issued_at = None
 
     # --- Uuden rotaation käynnistys ---
-    # Rotaatio käynnistetään jos se on pyydetty (pending_token_hash == "rotate")
-    # tai jos edellinen token on yli 30 päivää vanha eikä uutta rotaatiota ole käynnissä.
-    should_rotate = (pending_token_hash == "rotate")
+    should_rotate = rotation_requested
     if not should_rotate and token_issued_at and not pending_token_hash:
         if token_issued_at.tzinfo is None:
             token_issued_at = token_issued_at.replace(tzinfo=timezone.utc)
-        if (now - token_issued_at).total_seconds() > 30 * 24 * 3600:
+        if (now - token_issued_at).total_seconds() > _TOKEN_ROTATION_SECONDS:
             should_rotate = True
 
     if should_rotate:
         new_token_plaintext = secrets.token_urlsafe(32)
         upsert_linux_device(device_id, {
             "pending_token_hash": hash_token(new_token_plaintext),
-            "rotation_started_at": now,
+            "pending_token_issued_at": now,
+            "rotation_requested": False,
             "token_rotation_failed": False,
         })
         logger.info("Triggered token rotation for device %s", device_id)
@@ -143,11 +147,13 @@ def linux_mdm(device_id: str):
 def get_signing_pubkey():
     """Palauttaa KMS-avaimen julkisen avaimen PEM-muodossa agentille."""
     if not KMS_KEY_PATH:
-        # Paikallinen mock-avain kehitykseen ja testaukseen
+        # Paikallinen mock-avain kehitykseen ja testaukseen.
+        # Tämä on oikea EC P-256 -avain, jonka yksityinen avain on vain testeissä.
+        # Generoitu: openssl ecparam -name prime256v1 -genkey | openssl ec -pubout
         mock_pem = (
             "-----BEGIN PUBLIC KEY-----\n"
-            "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE13f5yW4Tevc4Yx0W7LqLlhf7pI+a\n"
-            "0K/V3q6r9M8Z87f4l82s7X9+8x5k+q8e+0g0w8x8d/1o5z8A8y8Y0+3+4w==\n"
+            "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjbFXNeiPLHDe9MDqtFtGpixBNrsT\n"
+            "oImW/5EuWfcbvdTtIsFpSmGgH5K9J5m8Z8XdT3lXeIfaML8FgP7LOb7rCg==\n"
             "-----END PUBLIC KEY-----"
         )
         return jsonify({"public_key": mock_pem, "key_version": "mock-version-1"})

@@ -11,12 +11,30 @@ ISO 27001 -viittaukset:
 from __future__ import annotations
 import hashlib
 import re
+from functools import wraps
+from flask import request, jsonify, g
+import secrets
+from datetime import datetime, timezone
+from .db import get_linux_device
+
+# ---------------------------------------------------------------------------
+# Vakiot
+# ---------------------------------------------------------------------------
 
 # Laitetunnisteen muodon validointi (64 merkkiä, hex).
 # ISO 27001 Audit Evidence: Device ID:t ovat tiukasti validoituja ennen Firestore-hakuja
 # estäen SQL-injection tai NoSQL-pääsynkalastelun (impersonation).
 _DEVICE_ID_RE = re.compile(r"^[a-f0-9]{64}$")
 
+# Token rotation -vakiot — käytetään sekä linux_common.py:ssä että linux_mdm.py:ssä.
+# Yhteinen lähde estää magic number -duplikaation.
+TOKEN_GRACE_PERIOD_SECONDS: int = 24 * 3600   # 24 h
+TOKEN_ROTATION_DAYS: int = 30                  # 30 vrk
+
+
+# ---------------------------------------------------------------------------
+# Hash-apufunktio
+# ---------------------------------------------------------------------------
 
 def hash_token(token: str) -> str:
     """Laskee Bearer-tokenista SHA-256 tiivisteen Firestore-hakua varten.
@@ -33,11 +51,9 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
 
 
-from functools import wraps
-from flask import request, jsonify, g
-import secrets
-from datetime import datetime, timezone
-from .db import get_linux_device
+# ---------------------------------------------------------------------------
+# Autentikaatiodekoraattori
+# ---------------------------------------------------------------------------
 
 def require_linux_device(f):
     @wraps(f)
@@ -61,7 +77,7 @@ def require_linux_device(f):
 
         current_hash = device.get("token_hash")
         pending_hash = device.get("pending_token_hash")
-        rotation_started_at = device.get("rotation_started_at")
+        pending_issued_at = device.get("pending_token_issued_at")
 
         token_hash = hash_token(token)
         authorized = False
@@ -69,13 +85,13 @@ def require_linux_device(f):
 
         if current_hash and secrets.compare_digest(token_hash, current_hash):
             authorized = True
-        elif pending_hash and pending_hash != "rotate" and secrets.compare_digest(token_hash, pending_hash):
-            if rotation_started_at:
+        elif pending_hash and secrets.compare_digest(token_hash, pending_hash):
+            if pending_issued_at:
                 now = datetime.now(timezone.utc)
-                if rotation_started_at.tzinfo is None:
-                    rotation_started_at = rotation_started_at.replace(tzinfo=timezone.utc)
-                age_seconds = (now - rotation_started_at).total_seconds()
-                if age_seconds <= 24 * 3600:
+                if pending_issued_at.tzinfo is None:
+                    pending_issued_at = pending_issued_at.replace(tzinfo=timezone.utc)
+                age_seconds = (now - pending_issued_at).total_seconds()
+                if age_seconds <= TOKEN_GRACE_PERIOD_SECONDS:
                     authorized = True
                     promote_pending = True
 
@@ -86,20 +102,24 @@ def require_linux_device(f):
             from .db import upsert_linux_device
             upsert_linux_device(resolved_device_id, {
                 "token_hash": pending_hash,
-                "token_issued_at": rotation_started_at,
+                "token_issued_at": pending_issued_at,
                 "pending_token_hash": None,
-                "rotation_started_at": None
+                "pending_token_issued_at": None
             })
             device["token_hash"] = pending_hash
-            device["token_issued_at"] = rotation_started_at
+            device["token_issued_at"] = pending_issued_at
             device["pending_token_hash"] = None
-            device["rotation_started_at"] = None
+            device["pending_token_issued_at"] = None
 
         g.device = device
         g.device_id = resolved_device_id
         return f(*args, device_id=resolved_device_id, **kwargs)
     return wrapper
 
+
+# ---------------------------------------------------------------------------
+# KMS-allekirjoitus
+# ---------------------------------------------------------------------------
 
 import json
 import unicodedata
@@ -108,23 +128,49 @@ import os
 import logging
 
 logger = logging.getLogger(__name__)
-KMS_KEY_PATH = os.environ.get("FALKO_KMS_KEY_PATH")
+KMS_KEY_PATH: str | None = os.environ.get("FALKO_KMS_KEY_PATH")
 
 
-def sign_command_payload(device_id: str, command_id: str, command_type: str, payload: dict) -> tuple[str, str]:
-    """Signs command payload using GCP KMS. Falls back to mock signing in local environments."""
+def sign_command_payload(
+    device_id: str,
+    command_id: str,
+    command_type: str,
+    payload: dict,
+) -> tuple[str, str]:
+    """Allekirjoittaa komentojen kuorman GCP KMS:llä.
+
+    Jos FALKO_KMS_KEY_PATH ei ole asetettu (lokaali kehitys/testaus),
+    käytetään SHA-256-pohjaista mock-allekirjoitusta.
+
+    Tuotannossa (FALKO_KMS_KEY_PATH asetettu) KMS-virhe heittää RuntimeError:
+    kutsuva koodi palauttaa HTTP 503 adminille eikä laske mock-fallbackiin.
+    Tämä estää komentojen lähetyksen ilman kryptografista suojausta KMS-katkon
+    sattuessa.
+
+    Args:
+        device_id: Laitteen tunniste.
+        command_id: Komennon yksilöllinen tunniste.
+        command_type: Komennon tyyppi (esim. 'InstallPackage').
+        payload: Komennon parametrit.
+
+    Returns:
+        tuple[str, str]: (allekirjoitus base64, avainversio)
+
+    Raises:
+        RuntimeError: Jos KMS-allekirjoitus epäonnistuu tuotannossa.
+    """
     data_dict = {
         "device_id": device_id,
         "command_id": command_id,
         "command_type": command_type,
-        "payload": payload
+        "payload": payload,
     }
-    # Canonical JSON string and Unicode NFC normalization
+    # Kanoninen JSON + NFC-normalisointi (yhteensopiva agentin verify_command_signature():n kanssa)
     serialized = json.dumps(data_dict, sort_keys=True, separators=(',', ':'))
     normalized = unicodedata.normalize('NFC', serialized).encode('utf-8')
 
     if not KMS_KEY_PATH:
-        # Local dev/test mock fallback (SHA256 signature in Base64)
+        # Lokaali kehitys/testaus — mock-allekirjoitus
         mock_sig = base64.b64encode(hashlib.sha256(normalized).digest()).decode('utf-8')
         return mock_sig, "mock-version-1"
 
@@ -141,8 +187,7 @@ def sign_command_payload(device_id: str, command_id: str, command_type: str, pay
         key_version = KMS_KEY_PATH.split('/')[-1] if '/' in KMS_KEY_PATH else "1"
         return signature_b64, key_version
     except Exception as e:
-        logger.warning("KMS signing failed, falling back to mock signature: %s", e)
-        mock_sig = base64.b64encode(hashlib.sha256(normalized).digest()).decode('utf-8')
-        return mock_sig, "mock-fallback"
-
-
+        # Tuotannossa KMS-virhe on kriittinen — ei sallita fallbackia.
+        # HTTP 503 palautetaan adminille kutsuvan koodin kautta.
+        logger.error("KMS signing failed: %s", e)
+        raise RuntimeError(f"Command signing unavailable: {e}") from e

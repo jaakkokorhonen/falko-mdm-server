@@ -18,6 +18,7 @@ Arkkitehtoniset päätökset (Production Simplifications):
     Sigstore/Cosign-työkalujen sijaan, jotta agentin riippuvuudet ja asennuskoko pysyvät pieninä.
 """
 from __future__ import annotations
+import atexit
 import base64
 import hashlib
 import json
@@ -39,6 +40,71 @@ from . import executor
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# SQLite replay-suojaus
+# ---------------------------------------------------------------------------
+
+_db_conn: sqlite3.Connection | None = None
+
+
+def _get_db() -> sqlite3.Connection:
+    """Palauttaa moduulitason SQLite-yhteyden. Avaa yhteyden lazily ensimmäisellä kutsulla.
+
+    check_same_thread=False on turvallinen koska:
+      - Pollaussilmukka ja mahdollinen tuleva FCM-listener ajavat eri säikeissä.
+      - Kirjoitukset ovat yksittäisiä INSERT ... WHERE NOT EXISTS -operaatioita
+        jotka SQLite serialisoi automaattisesti WAL-tilassa.
+    Yhteys suljetaan _close_db():lla (atexit-rekisteröity).
+    """
+    global _db_conn
+    if _db_conn is None:
+        db_path = os.environ.get("FALKO_DB_PATH", "/var/lib/falko/seen_commands.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        _db_conn = sqlite3.connect(db_path, check_same_thread=False)
+        _db_conn.execute(
+            "CREATE TABLE IF NOT EXISTS seen_commands "
+            "(command_id TEXT PRIMARY KEY, seen_at INTEGER DEFAULT (strftime('%s','now')))"
+        )
+        _db_conn.commit()
+    return _db_conn
+
+
+def _close_db() -> None:
+    """Sulkee SQLite-yhteyden siististi prosessin lopussa (atexit)."""
+    global _db_conn
+    if _db_conn is not None:
+        try:
+            _db_conn.close()
+        except Exception:
+            pass
+        _db_conn = None
+
+
+atexit.register(_close_db)
+
+
+def is_command_replay(cmd_id: str) -> bool:
+    """Tarkistaa onko komento suoritettu aiemmin (seen_commands.db).
+
+    Käyttää moduulitason SQLite-yhteyttä. Ei avaa uutta yhteyttä joka kutsulla.
+    INSERT OR IGNORE on atomiinen — ei erillistä SELECT + INSERT -paria.
+
+    Returns:
+        True jos komento on jo suoritettu (replay), False jos uusi.
+    """
+    conn = _get_db()
+    cursor = conn.execute(
+        "INSERT OR IGNORE INTO seen_commands (command_id) VALUES (?)", (cmd_id,)
+    )
+    conn.commit()
+    # rowcount == 0 tarkoittaa että rivi oli jo olemassa (replay)
+    return cursor.rowcount == 0
+
+
+# ---------------------------------------------------------------------------
+# Token
+# ---------------------------------------------------------------------------
 
 def _read_token() -> str | None:
     """Lukee Bearer-tokenin tiedostosta. Palauttaa None jos epäonnistuu.
@@ -71,6 +137,10 @@ def _read_token() -> str | None:
         logger.error("Failed to read token file: %s", e)
         return None
 
+
+# ---------------------------------------------------------------------------
+# Check-in
+# ---------------------------------------------------------------------------
 
 def checkin(token: str, device_id: str, inv_data: dict | None = None) -> bool:
     """Suorittaa laitteen ensi-check-inin palvelimelle käynnistyksen yhteydessä.
@@ -106,25 +176,9 @@ def checkin(token: str, device_id: str, inv_data: dict | None = None) -> bool:
         return False
 
 
-def is_command_replay(cmd_id: str) -> bool:
-    """Tarkistaa onko komento suoritettu aiemmin (seen_commands.db)."""
-    db_path = os.environ.get("FALKO_DB_PATH", "/var/lib/falko/seen_commands.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS seen_commands (command_id TEXT PRIMARY KEY, seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        cursor.execute("SELECT 1 FROM seen_commands WHERE command_id = ?", (cmd_id,))
-        exists = cursor.fetchone() is not None
-        if not exists:
-            cursor.execute("INSERT INTO seen_commands (command_id) VALUES (?)", (cmd_id,))
-            conn.commit()
-        return exists
-    finally:
-        conn.close()
-
+# ---------------------------------------------------------------------------
+# Allekirjoituksen verifiointi
+# ---------------------------------------------------------------------------
 
 def verify_command_signature(device_id: str, command: dict, pubkey_pem: str) -> bool:
     """Verifioi komennon KMS-allekirjoituksen."""
@@ -186,6 +240,10 @@ def fetch_signing_pubkey() -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Poll-silmukka
+# ---------------------------------------------------------------------------
+
 def poll_loop(token: str, device_id: str) -> None:
     """Säännöllinen komentojen pollaussilmukka.
 
@@ -205,7 +263,6 @@ def poll_loop(token: str, device_id: str) -> None:
             "Content-Type": "application/json",
         }
 
-        # Lähetetään edellisen komennon tulos palvelimelle, jos sellainen on
         payload: dict = {}
         if last_result:
             payload["result"] = last_result
@@ -220,25 +277,22 @@ def poll_loop(token: str, device_id: str) -> None:
                 data = res.json()
                 server_meta = data.get("server_meta", {})
 
-                # Tarkistetaan tokenin rotaatio (Issue #58)
+                # Tokenin rotaatio (Issue #58)
                 new_token = server_meta.get("new_token")
                 if new_token:
                     token_path = CONFIG.token_path
                     tmp_path = token_path.with_suffix(".tmp")
                     try:
-                        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                         with os.fdopen(fd, 'w') as f:
                             f.write(new_token)
-                        os.replace(tmp_path, token_path)
+                        os.replace(str(tmp_path), str(token_path))
                         logger.info("Token rotated successfully and saved atomically.")
                         token = new_token
                     except Exception as e:
                         logger.error("Failed to save rotated token atomically: %s", e)
 
-                # Tarkistetaan agent-päivitystarve
-                latest_agent_version = server_meta.get(
-                    "latest_agent_version"
-                )
+                latest_agent_version = server_meta.get("latest_agent_version")
                 if latest_agent_version and latest_agent_version != AGENT_VERSION:
                     logger.warning(
                         "New agent version available: %s (installed: %s). "
@@ -258,7 +312,10 @@ def poll_loop(token: str, device_id: str) -> None:
 
                     # Replay-suojaus (Issue #44)
                     if is_command_replay(cmd_id):
-                        logger.error("Replay attack detected: command %s already executed. Skipping.", cmd_id)
+                        logger.error(
+                            "Replay attack detected: command %s already executed. Skipping.",
+                            cmd_id,
+                        )
                         last_result = {
                             "command_id": cmd_id,
                             "status": {
@@ -295,7 +352,6 @@ def poll_loop(token: str, device_id: str) -> None:
                             }
 
             elif res.status_code == 401:
-                # Token saattaa olla vaihtunut — yritetään lukea uudelleen tiedostosta
                 logger.error(
                     "Authentication failure (401) on poll. Re-reading token and backing off."
                 )
@@ -306,7 +362,6 @@ def poll_loop(token: str, device_id: str) -> None:
                 continue
 
             elif 500 <= res.status_code < 600:
-                # Palvelinvirhe — eksponentiaalinen backoff
                 backoff = min(backoff + 60, 600)
                 logger.warning(
                     "Server error %d on poll. Backing off for %d s.",
@@ -330,13 +385,16 @@ def poll_loop(token: str, device_id: str) -> None:
         time.sleep(CONFIG.poll_interval)
 
 
+# ---------------------------------------------------------------------------
+# Käynnistys
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     """Agentin käynnistysfunktio.
 
     Lukee tokenin ja device_id:n kerran käynnistyksessä ja välittää ne
     alitoiminnoille argumentteina — ei moduulitason globaaleja.
     """
-    # Alustetaan lokitus standardivirtaan journaldia varten
     logging.basicConfig(
         level=getattr(logging, CONFIG.log_level, logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -344,20 +402,17 @@ def main() -> None:
 
     logger.info("Initializing falko-agent version %s", AGENT_VERSION)
 
-    # Luetaan token kerran käynnistyksessä — poll_loop() lukee uudelleen vain 401-vastauksessa
     token = _read_token()
     if not token:
         logger.critical("Cannot start: token file missing or unreadable. Exiting.")
         return
 
-    # Lasketaan device_id kerran — se ei muutu ajon aikana
     inv_data = inventory.collect()
     device_id = inv_data.get("device_id")
     if not device_id:
         logger.critical("Cannot start: device_id could not be determined. Exiting.")
         return
 
-    # Suoritetaan käynnistyksen check-in. Jos epäonnistuu, yritetään silti pollausta myöhemmin.
     checkin(token=token, device_id=device_id, inv_data=inv_data)
 
     try:
