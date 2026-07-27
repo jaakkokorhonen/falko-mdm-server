@@ -110,18 +110,18 @@ Issues: [#38][i38] [#39][i39] [#40][i40] [#41][i41] [#42][i42] [#43][i43]
 
 | Item | Description |
 |---|---|
-| Command signing | Admin signs command payload with GCP KMS asymmetric key; agent verifies before execution. Prevents arbitrary RCE via compromised server credentials. |
+| Command signing | Admin signs command payload with GCP KMS asymmetric key; agent verifies before execution. Prevents arbitrary RCE via compromised server credentials. Includes device_id and command_id in signed data to prevent replay attacks. Uses Unicode NFC normalization for determinism. |
 | Device token rotation | Tokens auto-rotate every 30 days. Agent fetches new token on next successful poll; server invalidates old token after grace period. |
-| Rate limiting on device endpoints | Cloud Armor or middleware: max 10 req/min per `device_id` on `/linux/checkin` and `/linux/mdm/*`. |
-| mTLS for agent–server channel | Agent presents a client certificate (issued at enrollment via GCP Certificate Authority Service). Replaces bearer token auth entirely. |
+| Rate limiting on device endpoints | Cloud Armor or middleware: max 10 req/min per `device_id` on `/linux/checkin` and `/linux/mdm/*`. Sharing external HTTPS LB with mTLS. |
+| mTLS for agent–server channel | Agent presents a client certificate (issued at enrollment via GCP Certificate Authority Service). Replaces bearer token auth entirely. Requires HTTPS External Load Balancer for mTLS termination. |
 | `ShellCommand` allowlist | Optionally restrict allowed shell commands to an admin-defined allowlist in Firestore. `ShellCommand` blocked by default; must be explicitly enabled per device or device group. |
 
 ### Reliability
 
 | Item | Description |
 |---|---|
-| FCM push wake-up | Agent registers FCM token at checkin. Server sends FCM message after enqueueing command. Agent wakes immediately instead of waiting up to 900 s. |
-| Agent auto-update | Server advertises latest agent version in poll response. If `agent_version` < `min_required_version`, agent downloads and self-updates from GCS bucket. |
+| SSE push wake-up | Agent maintains Server-Sent Events (SSE) keep-alive stream (`/linux/events/{device_id}`). Server sends wake-up signals immediately after command enqueue. Replaces FCM due to lack of client-side Python SDK desktop push receiver. |
+| Agent auto-update | Server advertises latest agent version in poll response. If `agent_version` < `min_required_version`, agent downloads and self-updates from GCS bucket. Verifies Sigstore/Cosign update signatures. |
 | Command retry logic | `NotNow`-equivalent: if agent responds `error` with `retryable: true`, server returns command to `pending` state for re-delivery on next poll. |
 | Stale device alerting | Cloud Monitoring log-based alert if `last_seen` > 24 h for any enrolled device. |
 | Dead-letter queue | Commands stuck in `sent` state for > 1 h (agent never acked) are moved to `dead_letter` status and trigger an alert. |
