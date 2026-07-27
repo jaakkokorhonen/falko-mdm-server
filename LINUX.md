@@ -27,6 +27,10 @@ This document describes the Linux device management design for Falko MDM, coveri
    - [Structured Logging and Observability](#structured-logging-and-observability)
    - [Firestore Security Rules](#firestore-security-rules)
    - [Integration Tests and CI](#integration-tests-and-ci)
+   - [Agent Hardening and Sandboxing](#agent-hardening-and-sandboxing)
+   - [LUKS Disk Encryption Key Escrow](#luks-disk-encryption-key-escrow)
+   - [Compliance Monitoring and Drift Detection](#compliance-monitoring-and-drift-detection)
+   - [Release Binary Signing](#release-binary-signing)
 6. [Endpoint Reference](#endpoint-reference)
 7. [Distro Support Matrix](#distro-support-matrix)
 8. [Issue Index](#issue-index)
@@ -311,6 +315,7 @@ All commands return `{"status": "acknowledged"|"error", "output": str, "exit_cod
 | `poll_interval` | `FALKO_POLL_INTERVAL` | `900` |
 | `token_path` | `FALKO_TOKEN_PATH` | `/etc/falko/device.token` |
 | `log_level` | `FALKO_LOG_LEVEL` | `INFO` |
+| `conf_path` | `FALKO_CONF_PATH` | `/etc/falko/agent.conf` |
 
 **falko-agent.service:**
 ```ini
@@ -321,11 +326,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=falko
+Group=falko
 ExecStart=/usr/bin/python3 /opt/falko-agent/agent.py
 Restart=on-failure
 RestartSec=60
 EnvironmentFile=-/etc/falko/agent.env
+ReadOnlyPaths=/
+ReadWritePaths=/opt/falko-agent /etc/falko /tmp
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -546,6 +558,38 @@ See the linked issue for full spec.
 
 ---
 
+### Agent Hardening and Sandboxing
+
+**Issue: [Draft]**
+
+Run agent commands in a sandboxed, least-privilege context. Harden the systemd service unit file with security directives (such as `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=true`, `CapabilityBoundingSet`) to limit access, and run commands as a separate unprivileged user where possible.
+
+---
+
+### LUKS Disk Encryption Key Escrow
+
+**Issue: [Draft]**
+
+Implement LUKS recovery key escrow. Workstations must securely generate and escrow LUKS recovery keys to Falko MDM server at enrollment. The server encrypts these keys with a GCP KMS key before storing them in Firestore, ensuring that only authorized administrators can decrypt them in a break-glass scenario.
+
+---
+
+### Compliance Monitoring and Drift Detection
+
+**Issue: [Draft]**
+
+Define compliance policies (e.g., firewall status, disk encryption, required software packages) on the server. The agent audits its configuration against these policies on a regular schedule and reports compliance status, with automatic remediation of drift when enabled.
+
+---
+
+### Release Binary Signing
+
+**Issue: [Draft]**
+
+Digitally sign agent release tarballs before GCS upload. The bootstrap script and agent auto-updater must verify the digital signature using a pinned public key before extracting and running the update. This guarantees binary integrity even if the GCS bucket or DNS is compromised.
+
+---
+
 ## Endpoint Reference
 
 | Method | Path | Auth | Description |
@@ -604,3 +648,8 @@ See the linked issue for full spec.
 | [#50](https://github.com/jaakkokorhonen/falko-mdm-server/issues/50) | Structured logging and observability |
 | [#51](https://github.com/jaakkokorhonen/falko-mdm-server/issues/51) | Firestore security rules for linux_devices |
 | [#52](https://github.com/jaakkokorhonen/falko-mdm-server/issues/52) | Integration tests and CI for Linux endpoints |
+| [Draft] | Systemd hardening and sandboxing for falko-agent |
+| [Draft] | LUKS disk encryption recovery key escrow |
+| [Draft] | Compliance monitoring and configuration drift detection |
+| [Draft] | Release binary signing and verification in agent auto-update |
+
