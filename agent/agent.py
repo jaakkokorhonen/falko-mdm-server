@@ -180,23 +180,38 @@ def checkin(token: str, device_id: str, inv_data: dict | None = None) -> bool:
 # Allekirjoituksen verifiointi
 # ---------------------------------------------------------------------------
 
+def _canonicalize_payload(device_id: str, command_id: str, command_type: str, payload: dict) -> bytes:
+    """Muodostaa kanonisen tavuesityksen komennosta allekirjoituksen tarkistusta varten."""
+    data_dict = {
+        "device_id": device_id,
+        "command_id": command_id,
+        "command_type": command_type,
+        "payload": payload or {}
+    }
+    serialized = json.dumps(data_dict, sort_keys=True, separators=(',', ':'))
+    return unicodedata.normalize('NFC', serialized).encode('utf-8')
+
+
 def verify_command_signature(device_id: str, command: dict, pubkey_pem: str) -> bool:
-    """Verifioi komennon KMS-allekirjoituksen."""
+    """Verifioi komennon KMS-allekirjoituksen.
+
+    Sitoo laite-ID:n ja komennon metatiedot allekirjoitukseen NIST SP 800-102
+    -standardin suositusten mukaisesti.
+    """
     signature_b64 = command.get("signature")
     key_version = command.get("key_version")
     if not signature_b64:
         logger.error("Command signature missing.")
         return False
 
+    normalized = _canonicalize_payload(
+        device_id,
+        command.get("id"),
+        command.get("type"),
+        command.get("payload", {})
+    )
+
     if key_version and key_version.startswith("mock"):
-        data_dict = {
-            "device_id": device_id,
-            "command_id": command.get("id"),
-            "command_type": command.get("type"),
-            "payload": command.get("payload", {})
-        }
-        serialized = json.dumps(data_dict, sort_keys=True, separators=(',', ':'))
-        normalized = unicodedata.normalize('NFC', serialized).encode('utf-8')
         mock_sig = base64.b64encode(hashlib.sha256(normalized).digest()).decode('utf-8')
         if signature_b64 == mock_sig:
             logger.info("Mock signature verified successfully.")
@@ -206,14 +221,6 @@ def verify_command_signature(device_id: str, command: dict, pubkey_pem: str) -> 
 
     try:
         public_key = load_pem_public_key(pubkey_pem.encode('utf-8'))
-        data_dict = {
-            "device_id": device_id,
-            "command_id": command.get("id"),
-            "command_type": command.get("type"),
-            "payload": command.get("payload", {})
-        }
-        serialized = json.dumps(data_dict, sort_keys=True, separators=(',', ':'))
-        normalized = unicodedata.normalize('NFC', serialized).encode('utf-8')
         signature = base64.b64decode(signature_b64)
 
         public_key.verify(
