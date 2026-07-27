@@ -11,12 +11,33 @@ ExecStart=/usr/bin/python3 /opt/falko-agent/agent.py
 Restart=on-failure
 RestartSec=60
 EnvironmentFile=-/etc/falko/agent.env
-ReadOnlyPaths=/
-ReadWritePaths=/opt/falko-agent /etc/falko /tmp
-NoNewPrivileges=yes
+
+# --- Filesystem hardening ---
+# ProtectSystem=strict tekee koko tiedostojärjestelmästä read-only agentille,
+# ReadWritePaths avaa vain välttämättömät polut kirjoitukselle.
+# /tmp on poistettu listalta: PrivateTmp=yes luo jo yksityisen /tmp-nimiavaruuden.
 ProtectSystem=strict
+ReadWritePaths=/opt/falko-agent /etc/falko
 ProtectHome=yes
 PrivateTmp=yes
+
+# --- Process hardening ---
+# NoNewPrivileges estää setuid/setgid-binäärien kautta tapahtuvan
+# oikeuksien korotuksen prosessipuussa.
+NoNewPrivileges=yes
+
+# CapabilityBoundingSet= (tyhjä) riisuu kaikki Linux capabilities prosessilta.
+# Falko-agent ei tarvitse mitään capabilities-oikeuksia normaalitoiminnassa.
+# Jos jokin komento vaatii lisäoikeuksia tulevaisuudessa, lisätään se tähän eksplisiittisesti.
+CapabilityBoundingSet=
+
+# RestrictNamespaces estää uusien kernel-nimiavaruuksien luomisen (container escape -vektori).
+RestrictNamespaces=yes
+
+# SystemCallFilter rajoittaa sallitut syscallit @system-service-setiin.
+# Hylkää harvinaiset / vaaralliset syscallit (ptrace, perf_event jne.).
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

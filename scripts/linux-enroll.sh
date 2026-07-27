@@ -1,11 +1,10 @@
-#!/bin/bash
-set -euo pipefail
-
+#!/usr/bin/env bash
 # Falko MDM Linux enrollment bootstrap script.
 # Usage: sudo bash scripts/linux-enroll.sh --token <one_time_token> [--server <url>]
 # Requires: bash 4+, Python 3.9+, systemd, curl
 # Tested on: Ubuntu 22.04, Ubuntu 24.04
 # Ref: LINUX.md — Enrollment section, issue #43
+set -euo pipefail
 
 FALKO_SERVER="${FALKO_SERVER:-https://mdm-api.falko.fi}"
 ONE_TIME_TOKEN=""
