@@ -596,6 +596,6 @@ def rotate_token_admin(device_id: str) -> Response:
         return jsonify({"error": "Laitetta ei löydy"}), 404
 
     from .db import upsert_linux_device
-    upsert_linux_device(device_id, {"rotation_requested": True})
+    upsert_linux_device(device_id, {"pending_token_hash": "rotate"})
     logger.info("Manuaalinen token-rotaatio pyydetty laitteelle %s", device_id)
     return jsonify({"status": "rotation_requested", "device_id": device_id})

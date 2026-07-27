@@ -103,8 +103,7 @@ def linux_enroll():
         "token_hash": hash_token(device_token),
         "token_issued_at": now,           # <-- tämä puuttui aiemmin
         "pending_token_hash": None,
-        "pending_token_issued_at": None,
-        "rotation_requested": False,
+        "rotation_started_at": None,
         "shell_command_enabled": False,
         "enrolled_at": now.isoformat(),
         "agent_version": payload.get("agent_version", ""),

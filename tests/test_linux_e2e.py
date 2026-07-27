@@ -15,15 +15,7 @@ from agent.agent import verify_command_signature, is_command_replay
 
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-PEM_KEY = (
-    "-----BEGIN EC PRIVATE KEY-----\n"
-    "MHcCAQEEIN3v5YwQ6N8v6f4Tebv4L8A3y1iVF+k6w8Y0+3+4w+oAoGCCqGSM49AwEH\n"
-    "HoUQDQgAE13f5yW4Tevc4Yx0W7LqLlhf7pI+a0K/V3q6r9M8Z87f4l82s7X9+8x5k\n"
-    "+q8e+0g0w8x8d/1o5z8A8y8Y0+3+4w==\n"
-    "-----END EC PRIVATE KEY-----"
-)
-
-PRIVATE_KEY = load_pem_private_key(PEM_KEY.encode('utf-8'), password=None)
+PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
 PUBLIC_PEM = PRIVATE_KEY.public_key().public_bytes(
     encoding=serialization.Encoding.PEM,
     format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -267,6 +259,20 @@ def test_linux_token_rotation_and_shell_policy(client, clean_sqlite_db, mocker):
     # Poll again with old token (grace period validation) - should still succeed
     poll_resp2 = client.put(f"/linux/mdm/{device_id}", json={}, headers=headers)
     assert poll_resp2.status_code == 200
+
+    # Test Grace Period Expiration (24h limit)
+    # Set rotation_started_at to 25 hours ago
+    device_store[device_id]["rotation_started_at"] = datetime.now(timezone.utc) - timedelta(hours=25)
+    poll_resp_expired = client.put(f"/linux/mdm/{device_id}", json={}, headers=headers)
+    assert poll_resp_expired.status_code == 200
+    assert device_store[device_id].get("pending_token_hash") is None
+    assert device_store[device_id].get("token_rotation_failed") is True
+
+    # Reset token and pending token for subsequent checks
+    new_token_hash = linux_common.hash_token("rotated-token-123")
+    device_store[device_id]["pending_token_hash"] = new_token_hash
+    device_store[device_id]["rotation_started_at"] = datetime.now(timezone.utc)
+    new_token = "rotated-token-123"
 
     # Poll with new token - should promote pending token and succeed
     new_headers = {"Authorization": f"Bearer {new_token}"}

@@ -61,7 +61,7 @@ def require_linux_device(f):
 
         current_hash = device.get("token_hash")
         pending_hash = device.get("pending_token_hash")
-        pending_issued_at = device.get("pending_token_issued_at")
+        rotation_started_at = device.get("rotation_started_at")
 
         token_hash = hash_token(token)
         authorized = False
@@ -69,12 +69,12 @@ def require_linux_device(f):
 
         if current_hash and secrets.compare_digest(token_hash, current_hash):
             authorized = True
-        elif pending_hash and secrets.compare_digest(token_hash, pending_hash):
-            if pending_issued_at:
+        elif pending_hash and pending_hash != "rotate" and secrets.compare_digest(token_hash, pending_hash):
+            if rotation_started_at:
                 now = datetime.now(timezone.utc)
-                if pending_issued_at.tzinfo is None:
-                    pending_issued_at = pending_issued_at.replace(tzinfo=timezone.utc)
-                age_seconds = (now - pending_issued_at).total_seconds()
+                if rotation_started_at.tzinfo is None:
+                    rotation_started_at = rotation_started_at.replace(tzinfo=timezone.utc)
+                age_seconds = (now - rotation_started_at).total_seconds()
                 if age_seconds <= 24 * 3600:
                     authorized = True
                     promote_pending = True
@@ -86,14 +86,14 @@ def require_linux_device(f):
             from .db import upsert_linux_device
             upsert_linux_device(resolved_device_id, {
                 "token_hash": pending_hash,
-                "token_issued_at": pending_issued_at,
+                "token_issued_at": rotation_started_at,
                 "pending_token_hash": None,
-                "pending_token_issued_at": None
+                "rotation_started_at": None
             })
             device["token_hash"] = pending_hash
-            device["token_issued_at"] = pending_issued_at
+            device["token_issued_at"] = rotation_started_at
             device["pending_token_hash"] = None
-            device["pending_token_issued_at"] = None
+            device["rotation_started_at"] = None
 
         g.device = device
         g.device_id = resolved_device_id

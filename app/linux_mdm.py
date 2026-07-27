@@ -53,20 +53,20 @@ def linux_mdm(device_id: str):
     device = g.device
     token_issued_at = device.get("token_issued_at")
     pending_token_hash = device.get("pending_token_hash")
-    pending_token_issued_at = device.get("pending_token_issued_at")
-    rotation_requested = device.get("rotation_requested", False)
+    rotation_started_at = device.get("rotation_started_at")
 
     new_token_plaintext = None
     now = datetime.now(timezone.utc)
 
     # --- Grace period -invalidaatio (#58) ---
-    # Jos pending_token_issued_at on yli 24 h vanha eikä agentti ole kuittannut
+    # Jos rotation_started_at on yli 24 h vanha eikä agentti ole kuittannut
     # uutta tokenia, rotaatio on epäonnistunut. Merkitään laite token_rotation_failed
     # -tilaan ja poistetaan pending-token. Cloud Monitoring hälyttää tästä tilasta.
-    if pending_token_hash and pending_token_issued_at:
-        if pending_token_issued_at.tzinfo is None:
-            pending_token_issued_at = pending_token_issued_at.replace(tzinfo=timezone.utc)
-        age = (now - pending_token_issued_at).total_seconds()
+    # HUOM: Varmistetaan, ettei pending_token_hash ole valeluku "rotate"
+    if pending_token_hash and pending_token_hash != "rotate" and rotation_started_at:
+        if rotation_started_at.tzinfo is None:
+            rotation_started_at = rotation_started_at.replace(tzinfo=timezone.utc)
+        age = (now - rotation_started_at).total_seconds()
         if age > _GRACE_PERIOD_SECONDS:
             logger.error(
                 "Token rotation grace period expired for device %s — marking token_rotation_failed",
@@ -74,18 +74,18 @@ def linux_mdm(device_id: str):
             )
             upsert_linux_device(device_id, {
                 "pending_token_hash": None,
-                "pending_token_issued_at": None,
+                "rotation_started_at": None,
                 "token_rotation_failed": True,
             })
-            # Päivitetään paikallinen device-dict jotta alla oleva rotaatiotarkistus
-            # ei yritä uutta rotaatiota välittömästi
             device["pending_token_hash"] = None
-            device["pending_token_issued_at"] = None
+            device["rotation_started_at"] = None
             pending_token_hash = None
-            pending_token_issued_at = None
+            rotation_started_at = None
 
     # --- Uuden rotaation käynnistys ---
-    should_rotate = rotation_requested
+    # Rotaatio käynnistetään jos se on pyydetty (pending_token_hash == "rotate")
+    # tai jos edellinen token on yli 30 päivää vanha eikä uutta rotaatiota ole käynnissä.
+    should_rotate = (pending_token_hash == "rotate")
     if not should_rotate and token_issued_at and not pending_token_hash:
         if token_issued_at.tzinfo is None:
             token_issued_at = token_issued_at.replace(tzinfo=timezone.utc)
@@ -96,8 +96,7 @@ def linux_mdm(device_id: str):
         new_token_plaintext = secrets.token_urlsafe(32)
         upsert_linux_device(device_id, {
             "pending_token_hash": hash_token(new_token_plaintext),
-            "pending_token_issued_at": now,
-            "rotation_requested": False,
+            "rotation_started_at": now,
             "token_rotation_failed": False,
         })
         logger.info("Triggered token rotation for device %s", device_id)

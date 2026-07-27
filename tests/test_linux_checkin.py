@@ -104,3 +104,113 @@ def test_linux_checkin_invalid_device_id_format(client):
     )
     assert response.status_code == 400
     assert "device_id" in response.json.get("error", "")
+
+
+from datetime import datetime, timezone, timedelta
+
+@pytest.mark.regression
+def test_linux_enroll_success(client, mocker):
+    """Verify enrollment succeeds with a valid enrollment token."""
+    mock_token_data = {
+        "used": False,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    }
+    
+    class MockDoc:
+        exists = True
+        def to_dict(self):
+            return mock_token_data
+            
+    class MockCollection:
+        def document(self, token_hash):
+            return MockDoc()
+            
+    class MockDB:
+        def collection(self, name):
+            return MockCollection()
+            
+    mocker.patch("app.linux_checkin.get_db", return_value=MockDB())
+    mock_upsert = mocker.patch("app.linux_checkin.upsert_linux_device")
+
+    payload = {
+        "device_id": VALID_DEVICE_ID,
+        "enrollment_token": "valid-token-123",
+        "hostname": "test-workstation",
+        "os": "Ubuntu 22.04 LTS"
+    }
+
+    response = client.post("/linux/enroll", json=payload)
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["status"] == "enrolled"
+    assert "device_token" in data
+    mock_upsert.assert_called_once()
+
+
+@pytest.mark.regression
+def test_linux_enroll_already_used(client, mocker):
+    """Verify enrollment fails if the enrollment token has already been used."""
+    mock_token_data = {
+        "used": True,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    }
+    
+    class MockDoc:
+        exists = True
+        def to_dict(self):
+            return mock_token_data
+            
+    class MockCollection:
+        def document(self, token_hash):
+            return MockDoc()
+            
+    class MockDB:
+        def collection(self, name):
+            return MockCollection()
+            
+    mocker.patch("app.linux_checkin.get_db", return_value=MockDB())
+
+    payload = {
+        "device_id": VALID_DEVICE_ID,
+        "enrollment_token": "already-used-token",
+        "hostname": "test-workstation"
+    }
+
+    response = client.post("/linux/enroll", json=payload)
+    assert response.status_code == 401
+    assert "already used" in response.get_json()["error"]
+
+
+@pytest.mark.regression
+def test_linux_enroll_expired(client, mocker):
+    """Verify enrollment fails if the enrollment token is expired."""
+    mock_token_data = {
+        "used": False,
+        "expires_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    }
+    
+    class MockDoc:
+        exists = True
+        def to_dict(self):
+            return mock_token_data
+            
+    class MockCollection:
+        def document(self, token_hash):
+            return MockDoc()
+            
+    class MockDB:
+        def collection(self, name):
+            return MockCollection()
+            
+    mocker.patch("app.linux_checkin.get_db", return_value=MockDB())
+
+    payload = {
+        "device_id": VALID_DEVICE_ID,
+        "enrollment_token": "expired-token",
+        "hostname": "test-workstation"
+    }
+
+    response = client.post("/linux/enroll", json=payload)
+    assert response.status_code == 401
+    assert "expired" in response.get_json()["error"]
+
