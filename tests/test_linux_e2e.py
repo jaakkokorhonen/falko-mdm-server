@@ -30,6 +30,13 @@ PUBLIC_PEM = PRIVATE_KEY.public_key().public_bytes(
 ).decode('utf-8')
 
 
+OTHER_KEY = ec.generate_private_key(ec.SECP256R1())
+OTHER_PUBLIC_PEM = OTHER_KEY.public_key().public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo
+).decode('utf-8')
+
+
 def e2e_sign_command(device_id: str, command_id: str, command_type: str, payload: dict) -> str:
     data_dict = {
         "device_id": device_id,
@@ -147,9 +154,16 @@ def test_linux_e2e_flow(client, clean_sqlite_db, mocker):
     assert command["signature"] == sig
 
     # 4. Agent verification (Signature verification & Replay protection)
-    # Verify signature
+    # Verify signature (positive case)
     assert verify_command_signature(device_id, command, PUBLIC_PEM) is True
     
+    # Verify signature (negative case: altered signature)
+    bad_signature_cmd = {**command, "signature": "altered-sig-value"}
+    assert verify_command_signature(device_id, bad_signature_cmd, PUBLIC_PEM) is False
+
+    # Verify signature (negative case: wrong public key)
+    assert verify_command_signature(device_id, command, OTHER_PUBLIC_PEM) is False
+
     # Verify replay detection (first time false, second time true)
     assert is_command_replay(cmd_id) is False
     assert is_command_replay(cmd_id) is True
