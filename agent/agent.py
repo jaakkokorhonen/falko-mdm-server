@@ -18,9 +18,20 @@ Arkkitehtoniset päätökset (Production Simplifications):
     Sigstore/Cosign-työkalujen sijaan, jotta agentin riippuvuudet ja asennuskoko pysyvät pieninä.
 """
 from __future__ import annotations
+import base64
+import hashlib
+import json
 import logging
+import os
+import sqlite3
 import time
+import unicodedata
+
 import requests
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
 from .config import CONFIG
 from .__version__ import __version__ as AGENT_VERSION
 from . import inventory
@@ -35,6 +46,20 @@ def _read_token() -> str | None:
     Token luetaan kutsun yhteydessä (ei välimuistiin), jotta token rotation
     toimii ilman agentin uudelleenkäynnistystä. Kutsutaan kerran checkin()-funktiossa
     ja kerran poll_loop()-silmukan alussa (ei joka iteraatiolla).
+
+    Turvallisuushuomio — stolen token -riski ja miksi se on hyväksyttävä:
+      Bearer-token on selkokielinen merkkijono /etc/falko/device.token -tiedostossa.
+      Jos hyökkääjä pääsee lukemaan tämän tiedoston, hänellä on jo root-tason pääsy
+      hallittuun koneeseen — MDM-tokenin varastaminen on tässä tilanteessa toissijainen
+      ongelma, ei pääuhka.
+
+      Tokenilla ei saa admin-oikeuksia eikä pääsyä muuhun infrastruktuuriin. Se antaa
+      pääsyn ainoastaan /linux/checkin- ja /linux/mdm/{device_id}-endpointeihin. KMS-
+      allekirjoitus (Issue #44) sitoo jokaisen komennon device_id:hen — sama allekirjoitettu
+      komento ei ole toistettavissa eri laitteella. Tokenin elinikä on rajattu 30 päivään
+      (Issue #58). mTLS olisi estänyt token-varastamisen, mutta GCP CAS -infrastruktuurin
+      lisäkompleksisuus ei ole perusteltua tälle uhkamallille. Tietoinen hyväksyntäpäätös
+      kirjattu PR #54 ja LINUX.md — Security Model -osiossa.
     """
     if not CONFIG.token_path.exists():
         logger.error("Bearer token file not found at %s", CONFIG.token_path)
@@ -79,17 +104,6 @@ def checkin(token: str, device_id: str, inv_data: dict | None = None) -> bool:
     except Exception as e:
         logger.error("Failed to connect to check-in server: %s", e)
         return False
-
-
-import json
-import base64
-import unicodedata
-import hashlib
-import os
-import sqlite3
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 
 def is_command_replay(cmd_id: str) -> bool:
