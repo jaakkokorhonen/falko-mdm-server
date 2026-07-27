@@ -135,3 +135,91 @@ This document lists likely ISO 27001 audit questions arising from the current Li
 
 ### 31. What is the concise audit answer today?
 **Answer:** The Linux MDM MVP is well documented and shows strong intent around endpoint hardening, but it is not yet audit-ready as a fully implemented ISO 27001 control set. It is better characterized as draft design plus partial implementation with important security controls still open. No major nonconformity would be raised at this stage if the team can demonstrate an active remediation plan for the open items listed above.
+
+---
+
+## TODO: Agent bypass threat model
+
+> **Status: open — requires risk acceptance record and compensating controls before production.**
+
+A local user with `sudo` or root access can bypass the current MVP agent with trivial effort. This section documents the threat model and planned mitigations.
+
+### Can a local user prevent wipe or disable MDM control?
+
+Yes. The Falko Linux agent runs as an unprivileged `falko` user under systemd. Commands like `RebootDevice`, `ShutDownDevice`, and `LockScreen` are executed via `systemctl reboot` and friends. There is **no wipe command implemented yet** in the current PR — the MVP has no Linux equivalent of Apple's `EraseDevice`.
+
+### Bypass attack vectors
+
+**Stopping the agent service** is the most obvious path. If the local user has `sudo` access (common on Linux workstations), they can simply run `sudo systemctl stop falko-agent` or `sudo systemctl disable falko-agent`. The MDM loses visibility immediately and permanently until someone re-enrolls. The current MVP has no heartbeat-loss alerting, so the server would not notice until the next missed check-in — which defaults to 900 seconds.
+
+**Killing the process directly** (`sudo kill <pid>`) achieves the same result even faster.
+
+**Modifying or deleting the token file** at `/etc/falko/device.token` with root access would cause all subsequent check-ins to fail authentication, effectively deregistering the device from the server's perspective without triggering any explicit unenrollment event.
+
+**Modifying `/etc/falko/agent.conf`** to point to a fake server would make the agent phone home to a localhost endpoint, keeping the process alive and fooling basic "is the service running" checks while being completely disconnected from real MDM control.
+
+### Why this is structurally hard on Linux
+
+This is a known fundamental limitation of software-only MDM on Linux. Apple macOS MDM works because the MDM profile is enforced at the kernel/firmware level via Activation Lock and the Secure Enclave, making removal require Apple's servers. Linux has no equivalent trusted execution boundary for MDM enforcement by default. The same problem affects every major Linux MDM product (Jamf Pro Linux, Canonical Landscape, Fleet) — they all rely on the agent staying running, and a root user can always stop it.
+
+### What the design plans but has not implemented
+
+The LUKS key escrow design in `LINUX.md` is the closest thing to a wipe-prevention mechanism — if the LUKS recovery key is escrowed server-side and the local copy is deleted or rotated at enrollment, the device becomes useless without MDM cooperation on next boot. But that workflow is not implemented in this PR, and it only helps for full-disk-encryption enforcement, not live wipe during an active session.
+
+### Planned mitigations (priority order)
+
+| Mechanism | Protection offered | Complexity | Status |
+|---|---|---|---|
+| LUKS key escrow | Crypto-brick on next boot if MDM revokes key | High | Planned, not implemented |
+| `sudo` restriction via `/etc/sudoers` for `falko-agent` service | Prevents unprivileged stop | Low | Not designed |
+| Systemd `ProtectKernelTunables` + immutable service via `systemd-sysext` | Makes disabling harder | Medium | Not designed |
+| TPM-bound agent token | Token unusable outside enrolled hardware | Very high | Not designed |
+| Heartbeat-loss alerting on server | Fast detection, not prevention | Low | Not implemented |
+
+**Risk acceptance required:** A local admin/root user can bypass the current MVP agent with trivial effort. This must be documented as an explicit accepted risk with owner, review date, and remediation timeline before the project moves toward production use with compliance requirements.
+
+---
+
+## TODO: LUKS key escrow — background and implementation gaps
+
+> **Status: open — designed in `LINUX.md`, not yet implemented in any code.**
+
+### What LUKS key escrow is
+
+LUKS key escrow is a mechanism where a copy of the disk encryption recovery key is sent to and stored by a trusted server at enrollment time, so that the organization retains the ability to decrypt the device even if the local user changes or deletes their own copy.
+
+### How LUKS works
+
+LUKS (Linux Unified Key Setup) is the standard full-disk encryption system on Linux. When a drive is encrypted with LUKS, the actual data encryption key (DEK) is stored in the LUKS header on disk, itself encrypted by one or more keyslots. Each keyslot holds a copy of the DEK encrypted with a different passphrase or key file. Up to 8 keyslots can exist on a single LUKS volume, so multiple passphrases can independently unlock the same drive.
+
+### How escrow enables remote wipe
+
+At enrollment time, the agent generates a strong random recovery passphrase, adds it to a free LUKS keyslot on the device's boot drive, and immediately sends that passphrase to the MDM server. The server stores it encrypted — in Falko's planned design, encrypted with a GCP KMS key before writing to Firestore, so the plaintext recovery key never sits unprotected in the database. The local user never sees this recovery key and continues using their own passphrase for normal daily unlocking.
+
+The result is a two-key system:
+
+| Key | Held by | Used for |
+|---|---|---|
+| User passphrase | Local user | Normal daily boot |
+| Recovery key | MDM server (KMS-encrypted) | Remote recovery, compliance wipe, lost-password unlock |
+
+A crypto-wipe works as follows: the MDM server sends a command that calls `cryptsetup luksRemoveKey` to delete the user's own keyslot, then rotates or deletes the escrowed recovery key server-side. After the next reboot the drive is permanently inaccessible — data is not erased byte-by-byte but is cryptographically destroyed because no remaining key can decrypt the DEK. This is called a **crypto-erase** and is effectively instantaneous and irreversible.
+
+### Why this resists local bypass
+
+LUKS key escrow shifts the enforcement point from the running operating system (where the agent can be killed) to the hardware boot sequence. Even if the user stops the agent, uninstalls it, or reimages the OS, the encrypted data on disk remains locked by the LUKS header. Without the recovery key from the server, or the user's own passphrase, the data is inaccessible. If the MDM has already rotated or revoked the escrowed key, even the organization cannot recover it — which is the desired behavior for a security wipe.
+
+The only real bypass requires the user to have saved the recovery key themselves before enrollment, or to physically remove the drive and use a different machine.
+
+### What is missing in the current Falko MVP
+
+The `LINUX.md` design describes this workflow at a high level, but nothing in PR #53 implements it. Open implementation gaps:
+
+- The enrollment script does not call `cryptsetup luksAddKey`
+- The agent has no escrow endpoint or recovery key transmission logic
+- The server has no KMS encryption wrapper for key storage in Firestore
+- There is no key revocation or rotation API
+- There is no wipe command type in `executor.py`
+- There is no audit trail for escrow operations
+
+This is a sound design that has not yet been built. It must be implemented before the Linux MDM can make meaningful remote-wipe guarantees to an auditor.
