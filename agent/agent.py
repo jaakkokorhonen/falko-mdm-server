@@ -1,5 +1,14 @@
 """Falko MDM Agent — Pääsilmukan sisääntulopiste.
+
 Käynnistää laitteen check-in-prosessin ja pollaa säännöllisesti uusia komentoja.
+
+ISO 27001 Audit Evidence:
+  - Control A.9.4.2 (Secure log-on procedures): Bearer-token haetaan turvallisesti rajatusta
+    paikallisesta tiedostosta (/etc/falko/device.token, chmod 600 root:root).
+  - Least Privilege & Sandboxing: Agentti on suunniteltu suoritettavaksi unprivileged 'falko'-käyttäjänä.
+    Riippuvuudet on rajattu vain standardikirjastoon ja requests-kirjastoon.
+  - Control A.12.4.1 (Event logging): Kaikki tietoliikennevirheet, käynnistykset,
+    check-in-tulokset ja backoff-tilat lokitetaan selkeästi journaldiin seurantaa varten.
 Ref: LINUX.md — agent.py poll loop
 """
 from __future__ import annotations

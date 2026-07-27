@@ -8,7 +8,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["app"]
+source = ["app", "agent"]
 omit = [
     "tests/*",
     "*/__init__.py",

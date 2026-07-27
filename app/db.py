@@ -244,3 +244,68 @@ def update_user_status(email: str, status: str, role: str | None = None) -> None
     if role is not None:
         update["role"] = role
     db.collection("users").document(email).update(update)
+
+
+# --- Linux-laitteet & Komennot ------------------------------------------------
+
+def upsert_linux_device(device_id: str, data: dict) -> None:
+    """Luo tai päivittää Linux-laitetietueen Firestoreen.
+
+    Args:
+        device_id: Laitteen uniikki tunniste (SHA-256).
+        data: Päivitettävät tiedot.
+    """
+    db = get_db()
+    db.collection("linux_devices").document(device_id).set(data, merge=True)
+
+
+def get_linux_device(device_id: str) -> dict | None:
+    """Hakee yksittäisen Linux-laitteen tiedot.
+
+    Args:
+        device_id: Laitteen uniikki tunniste.
+
+    Returns:
+        dict tai None jos laitetta ei löydy.
+    """
+    db = get_db()
+    doc = db.collection("linux_devices").document(device_id).get()
+    return doc.to_dict() if doc.exists else None
+
+
+def dequeue_linux_command(device_id: str) -> tuple[str, dict] | tuple[None, None]:
+    """Hakee ja palauttaa seuraavan odottavan komennon Linux-laitteen jonosta.
+
+    Args:
+        device_id: Laitteen uniikki tunniste.
+
+    Returns:
+        Kaksikko (cmd_id, cmd_dict), tai (None, None) jos jonossa ei ole komentoja.
+    """
+    db = get_db()
+    docs = (
+        db.collection("linux_devices").document(device_id)
+          .collection("commands")
+          .where("status", "==", "pending")
+          .order_by("created_at")
+          .limit(1)
+          .stream()
+    )
+    for doc in docs:
+        return doc.id, doc.to_dict()
+    return None, None
+
+
+def ack_linux_command(device_id: str, cmd_id: str, status: str = "acknowledged") -> None:
+    """Päivittää Linux-laitteen komennon tilan Firestoreen.
+
+    Args:
+        device_id: Laitteen uniikki tunniste.
+        cmd_id: Päivitettävän komennon dokumentti-ID.
+        status: Komennon uusi tila.
+    """
+    db = get_db()
+    db.collection("linux_devices").document(device_id) \
+      .collection("commands").document(cmd_id) \
+      .update({"status": status})
+
