@@ -223,3 +223,155 @@ The `LINUX.md` design describes this workflow at a high level, but nothing in PR
 - There is no audit trail for escrow operations
 
 This is a sound design that has not yet been built. It must be implemented before the Linux MDM can make meaningful remote-wipe guarantees to an auditor.
+
+---
+
+## Competitor benchmarking and recommended solutions
+
+> This section compares Falko's current and planned controls against Fleet (open-source), Fleet Premium, Microsoft Intune Linux, and Jamf Pro (macOS reference), and recommends concrete solutions that bring Falko to parity or better.
+
+### How competitors solve each open problem
+
+#### Device identity and authentication
+
+**Fleet (free)** uses a two-phase enrollment: the installer is bundled with a one-time `enroll_secret`, which the server exchanges for a per-host `node_key` on first contact. The client stores this server-issued `node_key` and uses it for all subsequent requests. The device identity is therefore server-assigned, not client-computed — a critical security difference from Falko's current SHA-256(hostname+machine-id) model.
+
+**Fleet Premium** goes further with TPM-bound host identity certificates (Linux kernel 4.12+, TPM 2.0 required). The private key is generated inside the TPM and never leaves the chip. The server can enforce `require_http_message_signature`, rejecting any request not signed by the TPM-bound key. This makes token theft and identity spoofing cryptographically infeasible without physical hardware access.
+
+**Microsoft Intune Linux** registers devices with an Azure AD device token, providing identity that is tied to the organizational directory rather than a local file.
+
+**Recommended solution for Falko:**
+
+1. **Short term (MVP → v1):** Implement server-issued device UUID at enrollment. At `POST /linux/checkin`, if the device has no Firestore record, the server generates a UUID, stores `{uuid, token_hash, enrolled_at}`, and returns the UUID to the agent. The agent writes this server-issued UUID to `/etc/falko/device.id` (mode `0600`, owner `falko`). Subsequent check-ins use this UUID, not the hostname hash. This matches Fleet free-tier behavior and eliminates the VM clone collision risk.
+
+2. **Long term (v2+):** Implement mTLS client certificates issued at enrollment and stored in a TPM keyslot where TPM 2.0 is available, falling back to a file-based client cert on older hardware. This matches Fleet Premium behavior. GCP Certificate Authority Service can act as the enrollment CA with short-lived certificates (24 h validity, auto-renewed by agent), eliminating long-lived token files entirely.
+
+```python
+# Recommended: server-side enrollment token exchange (linux_checkin.py)
+import secrets
+import hashlib
+
+def issue_device_token(device_id: str) -> str:
+    """Generate, store hash, return plaintext token to agent once."""
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    db.collection('linux_devices').document(device_id).set({
+        'token_hash': token_hash,
+        'issued_at': firestore.SERVER_TIMESTAMP,
+    }, merge=True)
+    return token  # sent once over TLS, never logged
+```
+
+#### Token validation (timing-safe)
+
+**All production MDM products** use timing-safe comparison for token/credential validation to prevent timing side-channel attacks. Python's `hmac.compare_digest` and `secrets.compare_digest` are the standard.
+
+**Recommended solution for Falko** (immediate, low effort):
+
+```python
+# app/linux_checkin.py and app/linux_mdm.py
+import secrets
+import hashlib
+
+def verify_device_token(provided_token: str, stored_hash: str) -> bool:
+    provided_hash = hashlib.sha256(provided_token.encode()).hexdigest()
+    return secrets.compare_digest(provided_hash, stored_hash)
+```
+
+Replace the current placeholder comment with this implementation. Both hashes are the same length (64 hex chars), so `compare_digest` operates in constant time.
+
+#### Agent tamper protection
+
+**Microsoft Defender for Endpoint** implements kernel-level tamper protection: the agent registers a kernel callback that blocks `SIGKILL` and file writes to agent directories even from root processes. This is not achievable in Python without a kernel module.
+
+**Fleet** does not implement kernel-level tamper protection in either tier. It accepts this as a known limitation and compensates with aggressive heartbeat monitoring (configurable down to 30 s) and automated device quarantine on missed check-ins.
+
+**Recommended solutions for Falko** (layered, in priority order):
+
+1. **`/etc/sudoers.d/falko-agent`** — drop a sudoers snippet at enrollment that prevents the `falko` group and any non-root user from stopping or disabling the `falko-agent` service. This is low effort and eliminates the most common bypass:
+    ```
+    # /etc/sudoers.d/falko-agent
+    # Prevent unprivileged users from stopping the MDM agent
+    ALL ALL = !EXEC: /usr/bin/systemctl stop falko-agent
+    ALL ALL = !EXEC: /usr/bin/systemctl disable falko-agent
+    ALL ALL = !EXEC: /usr/bin/systemctl mask falko-agent
+    ```
+
+2. **Heartbeat-loss alert** — server side: if a device has not checked in within `poll_interval * 3` seconds, emit a Cloud Monitoring alert and mark the device as `status: offline` in Firestore. This matches Fleet's detection model and gives the security team visibility within minutes rather than hours.
+
+3. **`systemd-sysext` immutable overlay (v2+)** — package the agent as a `systemd-sysext` extension image. Extension images are read-only overlays on `/usr` and `/opt`, making file modification impossible without root access to the raw extension image file. This raises the bypass bar significantly beyond a simple `sudo systemctl stop`.
+
+4. **TPM-sealed config (v3+)** — seal the server URL and token to the TPM with PCR values representing the boot state. If the boot chain is altered (kernel replaced, agent files tampered), the TPM unsealing fails and the agent cannot authenticate. This is the highest assurance level available on Linux without a kernel module.
+
+#### Update signing
+
+**Fleet** uses **TUF (The Update Framework)** for agent updates: the update server serves metadata signed by offline keys with threshold signatures, and the `orbit` updater verifies the full TUF chain before applying any binary. Key rotation is built into the protocol.
+
+**Falko's planned approach** (pinned public key) is simpler and adequate for MVP, but does not support key rotation without a code change. A practical intermediate path:
+
+```python
+# Recommended: verify download with Ed25519 signature before execution
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+PUBLIC_KEY_PEM = b"""-----BEGIN PUBLIC KEY-----
+... pinned at build time ...
+-----END PUBLIC KEY-----"""
+
+def verify_update(payload: bytes, signature: bytes) -> bool:
+    pub = load_pem_public_key(PUBLIC_KEY_PEM)
+    pub.verify(signature, payload)  # raises InvalidSignature on failure
+    return True
+```
+
+The bootstrap script should: download the agent tarball, download the detached `.sig` file from a separate URL, verify before unpacking, and refuse to proceed if verification fails. This eliminates supply-chain attacks on the installer.
+
+#### LUKS key escrow (remote wipe)
+
+No competitor has a fully implemented, open-source, GCP-native LUKS escrow solution. Falko's design (KMS-encrypted key in Firestore) is architecturally sound and differentiating. The implementation path:
+
+```bash
+# Enrollment script: add MDM recovery keyslot
+RECOVERY_KEY=$(openssl rand -base64 32)
+echo -n "$RECOVERY_KEY" | cryptsetup luksAddKey /dev/sda3 --key-file /dev/stdin
+
+# Send to server (HTTPS only, logged)
+curl -s -X POST https://mdm.example.com/linux/escrow \
+  -H "Authorization: Bearer $(cat /etc/falko/device.token)" \
+  -H "Content-Type: application/json" \
+  -d "{\"recovery_key\": \"$RECOVERY_KEY\", \"device_id\": \"$DEVICE_ID\"}"
+
+# Wipe recovery key from memory
+unset RECOVERY_KEY
+```
+
+Server stores `KMS.encrypt(recovery_key)` in Firestore, never plaintext. Wipe command: `luksRemoveKey` for user keyslot + KMS key deletion.
+
+### Competitor parity matrix
+
+| Control | Fleet free | Fleet Premium | Intune Linux | Falko MVP | Falko recommended |
+|---|---|---|---|---|---|
+| Server-issued device identity | ✅ node_key | ✅ TPM cert | ✅ Azure AD | ❌ client hash | ✅ server UUID → mTLS cert |
+| Timing-safe token comparison | ✅ | ✅ | ✅ | ❌ placeholder | ✅ `secrets.compare_digest` |
+| Kernel-level tamper protection | ❌ | ❌ | ❌ | ❌ | ❌ (not feasible in Python) |
+| sudoers-based stop restriction | ❌ | ❌ | ❌ | ❌ | ✅ sudoers snippet at enrollment |
+| Heartbeat-loss alerting | ✅ 30 s min | ✅ | ✅ | ❌ | ✅ Cloud Monitoring alert |
+| Update signing | ✅ TUF | ✅ TUF | ✅ pkg signature | ❌ planned | ✅ Ed25519 pinned key |
+| LUKS/FDE key escrow | ❌ | ❌ | ❌ | ❌ planned | ✅ KMS + Firestore (differentiating) |
+| Exponential backoff with jitter | ✅ | ✅ | ✅ | ❌ linear | ✅ `min(30*2^n + rand, 600)` |
+| CI security gates (bandit, pip-audit) | ✅ | ✅ | N/A | ❌ | ✅ GitHub Actions workflow |
+
+### Recommended implementation order
+
+Ordered by security impact vs. implementation effort:
+
+1. **Immediate (before any staging deployment):** Implement `secrets.compare_digest` token validation. Zero dependencies, ~10 lines of code, closes a critical authentication gap.
+2. **Before first real device enrollment:** Server-issued device UUID at enrollment. Eliminates identity collision and VM clone risks.
+3. **Sprint 1 post-MVP:** Heartbeat-loss Cloud Monitoring alert + device `status: offline` flag. Provides detection for agent bypass without kernel-level enforcement.
+4. **Sprint 1 post-MVP:** sudoers snippet deployment via enrollment script. Raises bypass bar for non-technical users.
+5. **Sprint 2:** Ed25519 update signing in bootstrap script and `executor.py` update handler.
+6. **Sprint 2:** LUKS key escrow in enrollment script + `/linux/escrow` server endpoint + KMS wrapper.
+7. **Sprint 2:** Exponential backoff with jitter in `agent.py` poll loop.
+8. **Sprint 3:** GitHub Actions CI with `pytest`, `bandit`, `pip-audit`, and a gate that blocks merge if `secrets.compare_digest` placeholder is absent.
+9. **v2 (optional, high assurance):** mTLS client certificates via GCP CA Service, replacing Bearer token entirely.
+10. **v3 (optional, highest assurance):** TPM-sealed config and identity on supported hardware.
