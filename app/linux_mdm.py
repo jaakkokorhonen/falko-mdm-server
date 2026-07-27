@@ -21,50 +21,30 @@ Arkkitehtoniset päätökset (Production Simplifications):
 """
 from __future__ import annotations
 import logging
-from datetime import datetime, timezone
-from flask import Blueprint, jsonify, request
+import os
+from google.cloud import firestore
+from flask import Blueprint, jsonify, request, g
 from .db import (
     ack_linux_command,
     dequeue_linux_command,
-    get_linux_device,
     upsert_linux_device,
 )
-from .linux_common import _DEVICE_ID_RE, hash_token
+from .linux_common import require_linux_device
 
 linux_mdm_bp = Blueprint("linux_mdm", __name__)
 logger = logging.getLogger(__name__)
 
+SERVER_AGENT_VERSION = os.environ.get("FALKO_LATEST_AGENT_VERSION", "0.1.0")
+
 
 @linux_mdm_bp.put("/linux/mdm/<device_id>")
+@require_linux_device
 def linux_mdm(device_id: str):
     """Käsittelee agentin komentokyselyn (poll) ja edellisen komennon kuittauksen (ack)."""
-    if not _DEVICE_ID_RE.match(device_id):
-        logger.warning("MDM poll attempt with invalid device_id format: %s", device_id)
-        return jsonify({"status": "error", "message": "Invalid device_id format"}), 400
-
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        logger.warning("MDM poll attempt with missing or invalid Authorization header format.")
-        return jsonify({"status": "error", "message": "Missing or invalid token"}), 401
-
-    token = auth_header.split(" ", 1)[1].strip()
-
-    # Vahvistetaan laitteen olemassaolo ja token.
-    # ISO 27001 Control A.9.4.2: Tunnistautuminen tarkistetaan SHA-256 tiivisteen kautta.
-    device = get_linux_device(device_id)
-    if not device:
-        logger.error("MDM poll failed: Device %s not found in Firestore.", device_id)
-        return jsonify({"status": "error", "message": "Device not enrolled"}), 404
-
-    stored_hash = device.get("token_hash")
-    if not stored_hash or hash_token(token) != stored_hash:
-        logger.warning("Unauthorized MDM poll attempt for device %s (token mismatch).", device_id)
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
-
     # Päivitetään viimeisin aktiivisuustieto (last_seen).
     # ISO 27001 Audit Evidence: Laitteen aktiivisuuden seuranta.
-    now = datetime.now(timezone.utc).isoformat()
-    upsert_linux_device(device_id, {"last_seen": now})
+    # Käytetään Firestore SERVER_TIMESTAMP -muuttujaa luotettavan palvelinpohjaisen aikaleiman saamiseksi.
+    upsert_linux_device(device_id, {"last_seen": firestore.SERVER_TIMESTAMP})
 
     payload = request.get_json(silent=True) or {}
     last_result = payload.get("result")
@@ -93,6 +73,6 @@ def linux_mdm(device_id: str):
     return jsonify({
         "command": command_payload,
         "server_meta": {
-            "latest_agent_version": "0.1.0"
+            "latest_agent_version": SERVER_AGENT_VERSION
         }
     }), 200
