@@ -75,7 +75,6 @@ import unicodedata
 import base64
 import os
 import logging
-from google.cloud import kms
 
 logger = logging.getLogger(__name__)
 KMS_KEY_PATH = os.environ.get("FALKO_KMS_KEY_PATH")
@@ -99,6 +98,7 @@ def sign_command_payload(device_id: str, command_id: str, command_type: str, pay
         return mock_sig, "mock-version-1"
 
     try:
+        from google.cloud import kms
         client = kms.KeyManagementServiceClient()
         response = client.asymmetric_sign(
             request={
