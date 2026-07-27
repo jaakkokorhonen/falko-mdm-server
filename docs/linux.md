@@ -268,7 +268,7 @@ All keys overridable via environment variables (`FALKO_SERVER_URL`, `FALKO_POLL_
 ### Production additions
 
 - **mTLS**: Bypassed (retained Bearer Token auth + secrets.compare_digest timing protection).
-- **Command signing**: **Implemented**. Every command payload is signed with a GCP KMS asymmetric key. Agent rejects unsigned or invalid-signature commands.
-- **Token rotation**: **Implemented**. Device tokens rotate on a 30-day schedule with a 24-hour grace period, plus manual admin triggers.
+- **Command signing**: **Implemented**. Every command payload is signed with a GCP KMS asymmetric key. Agent rejects unsigned or invalid-signature commands. Mock signatures are strictly disallowed in production mode and are only accepted when the `FALKO_TEST_MODE=1` environment variable is set. KMS client connections are pooled using a thread-safe singleton instance (`_get_kms_client()`).
+- **Token rotation**: **Implemented**. Device tokens rotate on a 30-day schedule with a 24-hour grace period, plus manual admin triggers. Polling updates (such as updating `last_seen` and token rotation fields) are combined into a single Firestore write operation per poll to optimize RPC costs.
 - **ShellCommand Policy**: **Implemented**. Firestore-based mode settings (disabled, allowlist, any) and per-device gating validate all enqueued commands.
 - **Rate limiting**: Cloud Armor blocks >10 req/min per `device_id` on device endpoints.
