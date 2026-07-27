@@ -218,6 +218,11 @@ resource "google_cloud_run_v2_service" "mdm_server" {
           }
         }
       }
+
+      env {
+        name  = "FALKO_KMS_KEY_PATH"
+        value = "projects/${var.gcp_project_id}/locations/${var.gcp_region}/keyRings/falko-mdm-keyring/cryptoKeys/falko-command-signing-key/cryptoKeyVersions/1"
+      }
     }
   }
 }
@@ -300,4 +305,51 @@ resource "google_project_iam_member" "sink_bq_writer" {
   project = var.gcp_project_id
   role    = "roles/bigquery.dataEditor"
   member  = google_logging_project_sink.audit_sink.writer_identity
+}
+
+# ============================================================
+# KMS-resurssit komentojen allekirjoitusta varten (Issue #56)
+# ============================================================
+
+resource "google_kms_key_ring" "keyring" {
+  project  = var.gcp_project_id
+  name     = "falko-mdm-keyring"
+  location = var.gcp_region
+}
+
+resource "google_kms_crypto_key" "command_signing_key" {
+  name     = "falko-command-signing-key"
+  key_ring = google_kms_key_ring.keyring.id
+  purpose  = "ASYMMETRIC_SIGN"
+
+  version_template {
+    algorithm        = "EC_SIGN_P256_SHA256"
+    protection_level = "SOFTWARE"
+  }
+}
+
+resource "google_kms_crypto_key_iam_member" "run_sa_kms_signer" {
+  crypto_key_id = google_kms_crypto_key.command_signing_key.id
+  role          = "roles/cloudkms.signerVerifier"
+  member        = "serviceAccount:${google_service_account.run_sa.email}"
+}
+
+# ============================================================
+# Firebase Ruleset & Release (Firestore Security Rules deployment, Issue #57)
+# ============================================================
+
+resource "google_firebaserules_ruleset" "firestore" {
+  project = var.gcp_project_id
+  source {
+    files {
+      name    = "firestore.rules"
+      content = file("${path.module}/../firestore.rules")
+    }
+  }
+}
+
+resource "google_firebaserules_release" "firestore" {
+  project      = var.gcp_project_id
+  name         = "cloud.firestore"
+  ruleset_name = google_firebaserules_ruleset.firestore.name
 }
