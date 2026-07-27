@@ -82,8 +82,6 @@ The Linux plane reuses the same Firestore database, the same OIDC-protected admi
 
 ## Firestore Data Model
 
-### `linux_devices/{device_id}`
-
 | Field | Type | Description |
 |---|---|---|
 | `device_id` | string | SHA-256 of `hostname + /etc/machine-id` (64-char hex) |
@@ -98,7 +96,11 @@ The Linux plane reuses the same Firestore database, the same OIDC-protected admi
 | `last_seen` | string | ISO 8601, updated on every poll |
 | `status` | string | `enrolled` \| `unenrolled` |
 | `agent_version` | string | Semver of installed agent |
-| `token_hash` | string | SHA-256 of device bearer token (MVP) |
+| `token_hash` | string | SHA-256 of device bearer token |
+| `token_issued_at` | timestamp | Timestamp of when the active token was issued |
+| `pending_token_hash` | string | SHA-256 of new token during rotation, or "rotate" to request manual rotation |
+| `rotation_started_at` | timestamp | Timestamp of when rotation was started |
+| `shell_command_enabled` | bool | Per-device ShellCommand gating policy flag |
 | `fcm_token` | string | FCM registration token (prod) |
 
 ### `linux_devices/{device_id}/commands/{cmd_id}`
@@ -122,6 +124,12 @@ One-time enrollment tokens. Fields: `used` (bool), `expires_at` (ISO 8601).
 ### `server_config/linux_agent`
 
 Fields: `min_agent_version`, `latest_agent_version`. Written by CI/CD and `POST /admin/linux/agent_version`.
+
+### `linux_settings/shell_command_policy`
+
+Firestore policy document. Fields:
+- `mode` (string): `disabled` \| `allowlist` \| `any`
+- `allowlist` (list of strings): Allowed command prefixes (used when mode is `allowlist`)
 
 ---
 
@@ -358,19 +366,22 @@ WantedBy=multi-user.target
 
 ### Out of Scope in MVP
 
-These items are explicitly deferred to the production phase (see [Production Design](#production-design)):
+These items are deferred or bypassed in the MVP phase (see [Production Design](#production-design)):
 
-- mTLS client certificate authentication
-- GCP KMS command signing
-- FCM push wake-up (agent polls on interval)
+- mTLS client certificate authentication (Bypassed)
+- FCM push wake-up (Bypassed)
 - Agent auto-update mechanism
 - `dnf` / `zypper` package manager support (apt/Ubuntu only in MVP)
 - `InstallPackage` / `RemovePackage` command types
 - Redis-backed distributed rate limiting
-- Structured JSON logging to Cloud Logging
-- Firestore security rules for `linux_devices`
-- End-to-end integration test suite
 - Windows or macOS agent
+
+The following production controls are fully implemented in the current release:
+- GCP KMS command signing (EC_SIGN_P256_SHA256) & signature verification
+- SQLite command replay protection database on the agent
+- Firestore security rules denying direct client access
+- Log-based metrics and Cloud Monitoring alert policies for security violations
+- End-to-end integration test suite (enroll -> check-in -> signed command -> ack)
 
 ---
 
@@ -382,22 +393,7 @@ Production graduation requires all items below. Each maps to a `Linux-prod` GitH
 
 **Issue: [#45](https://github.com/jaakkokorhonen/falko-mdm-server/issues/45)**
 
-Replace static bearer tokens with mutual TLS using GCP Certificate Authority Service (CAS). Short-lived certificates (30-day) bound to the TLS channel cannot be replayed from a different machine, eliminating the stolen-token attack vector.
-
-**Flow:**
-1. At enrollment, agent generates a P-256 key pair and a CSR with `CN=<device_id>`.
-2. `POST /linux/enroll` accepts CSR + one-time token, calls GCP CAS `CreateCertificate`, returns signed PEM.
-3. Agent writes `/etc/falko/device.crt` and `/etc/falko/device.key` (`chmod 600 root:root`).
-4. All subsequent requests use the client certificate for mTLS.
-5. Cloud Run LB passes `X-Client-Cert-Dn` header after successful mTLS handshake. `middleware.require_device_cert()` replaces `verify_device_token()`.
-
-**Renewal:** Agent checks expiry at startup and daily. If expiry < 7 days: auto-renew via `POST /linux/enroll/renew` (mTLS-authenticated).
-
-**Revocation:** `POST /admin/devices/:id/revoke` calls GCP CAS `RevokeCertificate`.
-
-**Migration from MVP:** Existing bearer-token-enrolled devices re-enroll via new one-time tokens. Feature flag `FALKO_AUTH_MODE=bearer|mtls` preserves backward compatibility during migration.
-
-**GCP CAS Terraform:** `google_privateca_ca_pool` + `google_privateca_certificate_authority` (`EC_P256_SHA256`, `europe-north1`).
+**Bypassed (Decided not to implement)**: Mutual TLS (mTLS) with GCP CAS is bypassed. Instead, the Bearer Token authentication model is retained with timing-safe SHA-256 comparison (`secrets.compare_digest`). Combined with KMS command payload signing (Issue #44), this achieves the same RCE protection without introducing GCP CAS, Private CA pools, or HTTPS Load Balancer infrastructure complexity.
 
 ---
 
@@ -408,41 +404,26 @@ Replace static bearer tokens with mutual TLS using GCP Certificate Authority Ser
 Sign all Linux command payloads with a GCP KMS asymmetric key (`EC_SIGN_P256_SHA256`). Agent verifies the signature before executing. This prevents a compromised server credential from issuing arbitrary `ShellCommand` payloads.
 
 **Server-side (enqueue):**
-1. Serialize `payload` to canonical JSON (sorted keys, no whitespace).
-2. Call KMS `AsymmetricSign`.
-3. Store `signature` (base64 DER) in Firestore command document.
-4. Return `signature` field in poll response.
+1. Serialize a metadata-bound payload to canonical JSON containing `device_id`, `command_id`, `command_type`, and `payload` with Unicode NFC normalization and `ensure_ascii=True` sorting.
+2. Call KMS `AsymmetricSign` using the latest primary key path `cryptoKeys/linux-command-signing` (not hardcoded to version 1).
+3. Store the returned `signature` (base64 DER) and the specific `kms_key_version` used in the Firestore command document to support key rotation.
+4. Return `signature` and `kms_key_version` fields in the poll response.
 
 **Agent-side (before execute):**
-1. Reconstruct canonical JSON of `payload`.
-2. Verify `signature` with cached public key (fetched from `GET /linux/command-signing-pubkey`).
-3. If invalid: ack with `error`, output `signature_invalid`, do not execute.
+1. Reconstruct the canonical JSON of the metadata-bound payload.
+2. Verify `signature` against the specific `kms_key_version` using the cached public key.
+3. Check local replay protection database (seen command IDs) to reject command replays.
+4. If invalid or already executed: ack with `error` (e.g., `signature_invalid`), do not execute.
 
-**Public key distribution:** `GET /linux/command-signing-pubkey` — unauthenticated, returns current PEM. Agent caches and re-fetches on `404` (key rotation).
-
-**Optional `ShellCommand` policy:** Firestore flag `linux_settings/shell_command_policy` (`disabled|allowlist|any`). Default `any`. Set to `allowlist` in prod with allowed command patterns in `linux_settings/shell_command_allowlist`.
-
-**KMS Terraform:** `google_kms_key_ring` + `google_kms_crypto_key` (`ASYMMETRIC_SIGN`, `EC_SIGN_P256_SHA256`). Cloud Run SA gets `roles/cloudkms.signerVerifier` on this key only.
+**Public key distribution:** `GET /linux/command-signing-pubkey` — returns PEM with cache headers (`Cache-Control: max-age=3600`). Agent caches and re-fetches on transition period key rotation.
 
 ---
 
-### FCM Push Wake-Up
+### Adaptive Polling (Push Wake-up Bypass)
 
 **Issue: [#46](https://github.com/jaakkokorhonen/falko-mdm-server/issues/46)**
 
-Integrate Firebase Cloud Messaging to reduce command latency from ≤900 s (poll interval) to <5 s.
-
-**Flow:**
-1. At checkin, agent registers with FCM and sends `fcm_token` in `POST /linux/checkin` payload.
-2. Server stores `fcm_token` on `linux_devices/{device_id}`.
-3. After `enqueue_linux_command()`, server calls `app/fcm.push_linux_device(fcm_token, device_id)`.
-4. Agent FCM listener receives message, sets `threading.Event` to wake the poll loop immediately.
-
-**Failure handling:** FCM push failure (missing token, network error, invalid token) is logged but does not fail the enqueue. The poll loop is always the authoritative delivery path.
-
-**`POST /admin/devices/:id/push?platform=linux`** (stub → real): returns `{"status": "pushed", "fcm_message_id": "..."}` or `{"status": "no_fcm_token"}`.
-
-**FCM token rotation:** Agent handles `messaging.UnregisteredError` (forwarded as flag in next poll response) and re-registers.
+**Bypassed (Decided not to implement)**: FCM/SSE push wake-up is bypassed. Instead, the agent uses a lightweight, configurable adaptive polling interval (e.g., 300 s / 5 min). This removes the need for FCM token registration, Firebase Admin SDK integration on the desktop, and persistent SSE stream keep-alive heartbeats on serverless Cloud Run.
 
 ---
 
@@ -460,22 +441,26 @@ Included even when command queue is empty. Server reads from `Firestore server_c
 
 **Agent update flow:**
 1. Compare `latest_agent_version` to own `agent.__version__`.
-2. If `latest > current` or `current < min_required`: download tarball from GCS.
-3. Verify SHA-256 checksum against `falko-agent-{version}.sha256` in bucket.
-4. Atomic swap: extract to `/opt/falko-agent-new/`, then `mv` backup, `mv` new to `/opt/falko-agent`.
-5. `systemctl restart falko-agent`.
+2. If `latest > current` or `current < min_required`: download tarball and its SHA-256 checksum and KMS signature (`.sha256.sig`) from GCS.
+3. Verify the KMS signature of the SHA-256 checksum (reusing the KMS public key from `/linux/command-signing-pubkey` instead of Sigstore Cosign).
+4. Verify extracted directory integrity (presence of `agent.py` and `__version__.py`).
+5. Atomic swap: copy backup (`cp -a`), and `mv` new to `/opt/falko-agent`.
+6. Restart via systemd `systemctl restart falko-agent`.
 
-**Rollback:** Watchdog systemd timer (every 5 min) detects stopped agent and restores backup.
+**Rollback:** systemd `OnFailure=falko-agent-rollback.service` automatically runs the rollback script when the agent fails to start or crashes repeatedly, avoiding continuous loop restarts.
 
 **GCS bucket structure:**
 ```
 falko-agent-releases/
   falko-agent-{version}.tar.gz
   falko-agent-{version}.sha256
+  falko-agent-{version}.sha256.sig   ← KMS signature of SHA-256 hash
   latest   ← plain text, current version
 ```
 
-**CI/CD:** `release-agent.yml` GitHub Actions workflow: bump version → build tarball → compute SHA-256 → upload to GCS → update `latest` → update `Firestore server_config/linux_agent`.
+**CI/CD:** `release-agent.yml` GitHub Actions workflow: bump version → build tarball → compute SHA-256 → sign the SHA-256 using GCP KMS → upload to GCS → update `latest` → update `Firestore server_config/linux_agent`.
+
+
 
 **Admin endpoint:** `POST /admin/linux/agent_version` (OIDC) — writes `min_agent_version` + `latest_agent_version` to Firestore.
 

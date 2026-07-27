@@ -200,3 +200,48 @@ resource "google_monitoring_alert_policy" "auth_failure_alert" {
     }
   }
 }
+
+
+# ------------------------------------------------------------
+# Linux MDM Tietoturvahälytykset (Issue #44 / Koodikatselmus)
+# ------------------------------------------------------------
+resource "google_logging_metric" "linux_security_violations" {
+  project = var.gcp_project_id
+  name    = "mdm/linux_security_violations"
+
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"falko-mdm-server\"",
+    "severity>=WARNING",
+    "(textPayload:\"Command signature verification failed\" OR textPayload:\"Replay attack detected\")",
+  ])
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+  }
+}
+
+resource "google_monitoring_alert_policy" "linux_security_alert" {
+  project      = var.gcp_project_id
+  display_name = "Linux MDM Security Violation Alert"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Linux-tietoturvaloukkauksia yli 0 / min"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.linux_security_violations.name}\" AND resource.type=\"cloud_run_revision\""
+      duration        = "60s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0 # Mikä tahansa allekirjoitusvirhe tai replay-yritys laukaisee hälytyksen
+      trigger {
+        count = 1
+      }
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_RATE"
+      }
+    }
+  }
+}
+

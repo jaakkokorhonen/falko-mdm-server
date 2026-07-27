@@ -15,7 +15,6 @@ Rate limiting:
   Ref: OWASP API Security Top 10 (2023) API4:2023 Unrestricted Resource Consumption.
 """
 import time
-import random
 import threading
 import logging
 from collections import defaultdict, deque
@@ -23,49 +22,28 @@ from flask import Flask, request, jsonify
 
 logger = logging.getLogger(__name__)
 
-# Rate limit -asetukset.
-# Muuta RATE_LIMIT_REQUESTS ja RATE_LIMIT_WINDOW tarpeen mukaan.
-_RATE_LIMIT_REQUESTS = 60   # max pyyntöä
-_RATE_LIMIT_WINDOW   = 60   # sekunteina (sliding window)
 
-# In-memory store: ip -> deque(timestamps)
-# HUOM: Ei jaettu Cloud Run -instanssien välillä — jokainen instanssi
-# pitää omaa laskuriaan. Tuotannossa käytä flask-limiter + Redis.
-_request_counts: dict[str, deque] = defaultdict(deque)
-_rate_lock = threading.Lock()
+class SlidingWindowLimiter:
+    def __init__(self, limit: int, window: int):
+        self._limit = limit
+        self._window = window
+        self._counts: dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
 
+    def is_limited(self, key: str) -> bool:
+        now = time.monotonic()  # monotonic, ei time.time() NTP-hyppyjen välttämiseksi
+        with self._lock:
+            dq = self._counts[key]
+            while dq and now - dq[0] > self._window:
+                dq.popleft()
+            if not dq:
+                self._counts.pop(key, None)
+            if len(dq) >= self._limit:
+                return True
+            dq.append(now)
+            return False
 
-def _is_rate_limited(ip: str) -> bool:
-    """Tarkistaa onko IP ylittänyt pyyntörajan.
-
-    Käyttää sliding window -algoritmia: vanhat timestampit poistetaan
-    ikkunan ulkopuolelta ennen tarkistusta.
-
-    Args:
-        ip: Pyytäjän IP-osoite.
-
-    Returns:
-        True jos IP on ylittänyt rajan, False muuten.
-    """
-    now = time.time()
-    with _rate_lock:
-        # Satunnainen siivous (1 % pyynnöistä) estämään muistivuotoa (inactive IPs memory leak)
-        if random.random() < 0.01:  # nosec B311
-            for k in list(_request_counts.keys()):
-                dq_clean = _request_counts[k]
-                while dq_clean and now - dq_clean[0] > _RATE_LIMIT_WINDOW:
-                    dq_clean.popleft()
-                if not dq_clean:
-                    _request_counts.pop(k, None)
-
-        dq = _request_counts[ip]
-        # Poista vanhat merkinnät ikkunan ulkopuolelta
-        while dq and now - dq[0] > _RATE_LIMIT_WINDOW:
-            dq.popleft()
-        if len(dq) >= _RATE_LIMIT_REQUESTS:
-            return True
-        dq.append(now)
-        return False
+_limiter = SlidingWindowLimiter(60, 60)
 
 
 def register_middleware(app: Flask) -> None:
@@ -83,7 +61,7 @@ def register_middleware(app: Flask) -> None:
         # X-Forwarded-For: Cloud Run asettaa tämän, käytetään ensimmäistä IP:tä
         forwarded_for = request.headers.get("X-Forwarded-For", "")
         ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.remote_addr or "unknown")
-        if _is_rate_limited(ip):
+        if _limiter.is_limited(ip):
             logger.warning("Rate limit ylitetty: ip=%s path=%s", ip, request.path)
             return jsonify({"error": "Liian monta pyyntöä — yritä uudelleen hetken kuluttua"}), 429
 

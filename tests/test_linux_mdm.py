@@ -21,7 +21,7 @@ def mock_device():
 @pytest.mark.smoke
 def test_linux_mdm_poll_no_command(client, mocker, mock_device):
     """Verify polling succeeds and returns empty command if none pending."""
-    mocker.patch("app.linux_mdm.get_linux_device", return_value=mock_device)
+    mocker.patch("app.linux_common.get_linux_device", return_value=mock_device)
     mocker.patch("app.linux_mdm.upsert_linux_device")
     mocker.patch("app.linux_mdm.dequeue_linux_command", return_value=(None, None))
 
@@ -39,7 +39,7 @@ def test_linux_mdm_poll_no_command(client, mocker, mock_device):
 @pytest.mark.regression
 def test_linux_mdm_poll_with_pending_command(client, mocker, mock_device):
     """Verify pending command is fetched and returned to client agent."""
-    mocker.patch("app.linux_mdm.get_linux_device", return_value=mock_device)
+    mocker.patch("app.linux_common.get_linux_device", return_value=mock_device)
     mocker.patch("app.linux_mdm.upsert_linux_device")
 
     cmd_payload = {"type": "ShellCommand", "payload": {"command": "echo 'Hello'"}}
@@ -64,7 +64,7 @@ def test_linux_mdm_poll_with_pending_command(client, mocker, mock_device):
 @pytest.mark.regression
 def test_linux_mdm_poll_with_acknowledgement(client, mocker, mock_device):
     """Verify last command result is acknowledged in database."""
-    mocker.patch("app.linux_mdm.get_linux_device", return_value=mock_device)
+    mocker.patch("app.linux_common.get_linux_device", return_value=mock_device)
     mocker.patch("app.linux_mdm.upsert_linux_device")
     mocker.patch("app.linux_mdm.dequeue_linux_command", return_value=(None, None))
     mock_ack = mocker.patch("app.linux_mdm.ack_linux_command")
@@ -89,7 +89,7 @@ def test_linux_mdm_poll_with_acknowledgement(client, mocker, mock_device):
 @pytest.mark.regression
 def test_linux_mdm_poll_unauthorized(client, mocker, mock_device):
     """Poll with incorrect token returns 401."""
-    mocker.patch("app.linux_mdm.get_linux_device", return_value=mock_device)
+    mocker.patch("app.linux_common.get_linux_device", return_value=mock_device)
 
     response = client.put(
         f"/linux/mdm/{VALID_DEVICE_ID}",

@@ -103,9 +103,9 @@ def test_security_headers_present_on_404(client):
 def test_rate_limit_healthz_not_limited(client):
     """/healthz ei saa 429:ää vaikka kutsutaan yli rajan."""
     # Asetetaan pieni raja ja kutsutaan reilusti yli
-    with patch.object(mw, "_RATE_LIMIT_REQUESTS", 3), \
-         patch.object(mw, "_RATE_LIMIT_WINDOW", 60), \
-         patch.dict(mw._request_counts, {}, clear=True):
+    with patch.object(mw._limiter, "_limit", 3), \
+         patch.object(mw._limiter, "_window", 60), \
+         patch.object(mw._limiter, "_counts", mw.defaultdict(mw.deque)):
         for _ in range(10):
             resp = client.get("/healthz")
             # /healthz ei saa koskaan saada 429
@@ -115,9 +115,9 @@ def test_rate_limit_healthz_not_limited(client):
 @pytest.mark.regression
 def test_rate_limit_allows_requests_under_limit(client):
     """Pyynöt rajan sisällä läpäistään normaalisti (ei 429)."""
-    with patch.object(mw, "_RATE_LIMIT_REQUESTS", 5), \
-         patch.object(mw, "_RATE_LIMIT_WINDOW", 60), \
-         patch.dict(mw._request_counts, {}, clear=True):
+    with patch.object(mw._limiter, "_limit", 5), \
+         patch.object(mw._limiter, "_window", 60), \
+         patch.object(mw._limiter, "_counts", mw.defaultdict(mw.deque)):
         for i in range(5):
             resp = client.get(
                 "/admin/devices",
@@ -129,9 +129,9 @@ def test_rate_limit_allows_requests_under_limit(client):
 @pytest.mark.regression
 def test_rate_limit_returns_429_when_exceeded(client):
     """Raja ylittyy: seuraava pyyntö saa 429."""
-    with patch.object(mw, "_RATE_LIMIT_REQUESTS", 3), \
-         patch.object(mw, "_RATE_LIMIT_WINDOW", 60), \
-         patch.dict(mw._request_counts, {}, clear=True):
+    with patch.object(mw._limiter, "_limit", 3), \
+         patch.object(mw._limiter, "_window", 60), \
+         patch.object(mw._limiter, "_counts", mw.defaultdict(mw.deque)):
         for _ in range(3):
             client.get("/admin/devices", headers={"X-Forwarded-For": "10.0.0.2"})
         resp = client.get("/admin/devices", headers={"X-Forwarded-For": "10.0.0.2"})
@@ -141,9 +141,9 @@ def test_rate_limit_returns_429_when_exceeded(client):
 @pytest.mark.regression
 def test_rate_limit_429_response_format(client):
     """429-vastaus on JSON jolla on 'error'-avain."""
-    with patch.object(mw, "_RATE_LIMIT_REQUESTS", 1), \
-         patch.object(mw, "_RATE_LIMIT_WINDOW", 60), \
-         patch.dict(mw._request_counts, {}, clear=True):
+    with patch.object(mw._limiter, "_limit", 1), \
+         patch.object(mw._limiter, "_window", 60), \
+         patch.object(mw._limiter, "_counts", mw.defaultdict(mw.deque)):
         client.get("/admin/devices", headers={"X-Forwarded-For": "10.0.0.3"})
         resp = client.get("/admin/devices", headers={"X-Forwarded-For": "10.0.0.3"})
         assert resp.status_code == 429
@@ -155,9 +155,9 @@ def test_rate_limit_429_response_format(client):
 @pytest.mark.regression
 def test_rate_limit_x_forwarded_for_first_ip(client):
     """X-Forwarded-For: ensimmäinen IP tunnistetaan, ei koko otsikon arvo."""
-    with patch.object(mw, "_RATE_LIMIT_REQUESTS", 2), \
-         patch.object(mw, "_RATE_LIMIT_WINDOW", 60), \
-         patch.dict(mw._request_counts, {}, clear=True):
+    with patch.object(mw._limiter, "_limit", 2), \
+         patch.object(mw._limiter, "_window", 60), \
+         patch.object(mw._limiter, "_counts", mw.defaultdict(mw.deque)):
         # Kaksi pyyntöä IP:ltä 10.10.10.1 (proxy-ketjun ensimmäinen)
         for _ in range(2):
             client.get(
@@ -175,9 +175,9 @@ def test_rate_limit_x_forwarded_for_first_ip(client):
 @pytest.mark.regression
 def test_rate_limit_different_ips_independent(client):
     """Eri IP-osoitteiden laskurit ovat toisistaan riippumattomia."""
-    with patch.object(mw, "_RATE_LIMIT_REQUESTS", 2), \
-         patch.object(mw, "_RATE_LIMIT_WINDOW", 60), \
-         patch.dict(mw._request_counts, {}, clear=True):
+    with patch.object(mw._limiter, "_limit", 2), \
+         patch.object(mw._limiter, "_window", 60), \
+         patch.object(mw._limiter, "_counts", mw.defaultdict(mw.deque)):
         # Tyhjennä IP A:n kiintiö
         for _ in range(2):
             client.get("/admin/devices", headers={"X-Forwarded-For": "192.168.1.1"})
@@ -189,9 +189,9 @@ def test_rate_limit_different_ips_independent(client):
 @pytest.mark.regression
 def test_rate_limit_security_headers_on_429(client):
     """Security headerit ovat läsnä myös 429-vastauksessa."""
-    with patch.object(mw, "_RATE_LIMIT_REQUESTS", 1), \
-         patch.object(mw, "_RATE_LIMIT_WINDOW", 60), \
-         patch.dict(mw._request_counts, {}, clear=True):
+    with patch.object(mw._limiter, "_limit", 1), \
+         patch.object(mw._limiter, "_window", 60), \
+         patch.object(mw._limiter, "_counts", mw.defaultdict(mw.deque)):
         client.get("/admin/devices", headers={"X-Forwarded-For": "10.0.0.99"})
         resp = client.get("/admin/devices", headers={"X-Forwarded-For": "10.0.0.99"})
         assert resp.status_code == 429

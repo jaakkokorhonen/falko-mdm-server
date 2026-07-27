@@ -37,8 +37,10 @@ from google.oauth2 import id_token
 from .db import (
     list_devices, get_device, enqueue_command,
     get_user, upsert_user, list_users, update_user_status,
+    get_linux_device, enqueue_linux_command,
 )
 from .apns import send_push
+from .linux_common import sign_command_payload
 
 # Bootstrap-adminit — ehdoton pääsy ilman Firestore-tarkistusta.
 # Nämä käyttäjät saavat automaattisesti admin-roolin ensimmäisellä kirjautumisella.
@@ -89,6 +91,20 @@ _ALLOWED_COMMANDS: frozenset[str] = frozenset({
 # NIST SP 800-53 AC-6: Principle of Least Privilege
 _DANGER_COMMANDS: frozenset[str] = frozenset({
     "EraseDevice",
+    "ShutDownDevice",
+})
+
+_LINUX_ALLOWED_COMMANDS: frozenset[str] = frozenset({
+    "ShellCommand",
+    "GetInventory",
+    "RebootDevice",
+    "ShutDownDevice",
+    "LockScreen",
+})
+
+_LINUX_DANGER_COMMANDS: frozenset[str] = frozenset({
+    "ShellCommand",
+    "RebootDevice",
     "ShutDownDevice",
 })
 
@@ -319,6 +335,78 @@ def send_command(udid: str) -> Response:
     if not command_type:
         return jsonify({"error": "command_type vaaditaan"}), 400
 
+    platform = request.args.get("platform", "apple")
+    if platform == "linux":
+        if command_type not in _LINUX_ALLOWED_COMMANDS:
+            logger.warning(
+                "Hylätty tuntematon Linux-command_type: %r (sallitut: %s)",
+                command_type, sorted(_LINUX_ALLOWED_COMMANDS)
+            )
+            return jsonify({
+                "error": f"Tuntematon Linux-command_type: {command_type!r}",
+                "allowed": sorted(_LINUX_ALLOWED_COMMANDS),
+            }), 400
+
+        if command_type in _LINUX_DANGER_COMMANDS:
+            email = _get_authenticated_email()
+            if email is None:
+                return jsonify({"error": "Autentikaatio puuttuu"}), 401
+            user = get_user(email)
+            if not user or user.get("role") != "admin":
+                logger.warning(
+                    "Estetty Linux DANGER-komento roolin takia: %s yritti %r (rooli: %s)",
+                    email, command_type, user.get("role") if user else "N/A",
+                )
+                return jsonify({
+                    "error": f"{command_type!r} on suojattu Linux-toiminto — vain admin-rooli sallittu."
+                }), 403
+
+        device = get_linux_device(udid)
+        if not device:
+            return jsonify({"error": "Linux-laitetta ei löydy"}), 404
+
+        if command_type == "ShellCommand":
+            from .db import get_db
+            policy_doc = get_db().collection("linux_settings").document("shell_command_policy").get()
+            policy = policy_doc.to_dict() if policy_doc.exists else {}
+            mode = policy.get("mode", "disabled")
+
+            if mode == "disabled":
+                return jsonify({"error": "ShellCommand is globally disabled"}), 400
+
+            if not device.get("shell_command_enabled", False):
+                return jsonify({"error": "ShellCommand not enabled for this device"}), 400
+
+            if mode == "allowlist":
+                cmd_to_run = body.get("payload", {}).get("command", "")
+                allowlist = policy.get("allowlist", [])
+                if not any(cmd_to_run.strip().startswith(allowed) for allowed in allowlist):
+                    return jsonify({"error": f"Command not in allowlist: {cmd_to_run}"}), 400
+
+        import uuid
+        cmd_id = str(uuid.uuid4())
+        signature, key_version = sign_command_payload(
+            device_id=udid,
+            command_id=cmd_id,
+            command_type=command_type,
+            payload=body.get("payload", {})
+        )
+
+        cmd = {
+            "type": command_type,
+            "payload": body.get("payload", {}),
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "signature": signature,
+            "key_version": key_version
+        }
+        enqueue_linux_command(udid, cmd, cmd_id=cmd_id)
+        logger.info(
+            "Linux-komento lisätty jonoon ja allekirjoitettu",
+            extra={"device_id": udid, "command_type": command_type, "command_id": cmd_id},
+        )
+        return jsonify({"status": "queued", "command_type": command_type, "command_id": cmd_id}), 202
+
     # Allowlist-validointi: estetään tuntemattomat RequestType-arvot
     if command_type not in _ALLOWED_COMMANDS:
         logger.warning(
@@ -331,24 +419,12 @@ def send_command(udid: str) -> Response:
         }), 400
 
     # Roolitarkistus vaarallisille komennoille (Principle of Least Privilege).
-    # require_auth on jo varmistanut autentikaation — tässä tarkistetaan vain rooli.
-    # _get_authenticated_email() kutsutaan toiseen kertaan pyyntökontekstissa;
-    # tämä on tietoinen päätös: vaihtoehtona olisi tallentaa email flask.g-objektiin
-    # require_auth-dekoraattorissa, mutta se lisäisi kytköstä dekoraattorin ja
-    # reittifunktioiden välille. Toinen kutsu on halpa (ei verkkoyhteyttä testissä).
-    # TODO(jaakko): Harkitse flask.g.user_email-tallennusta kun admin-endpointteja
-    #              on enemmän (DRY-periaate).
     if command_type in _DANGER_COMMANDS:
         email = _get_authenticated_email()
         if email is None:
-            # Tähän ei pitäisi päästä (require_auth hoitaa auth-tarkistuksen),
-            # mutta defensive programming: jos jotenkin email puuttuu → 401.
             return jsonify({"error": "Autentikaatio puuttuu"}), 401
 
         user = get_user(email)
-        # Roolitarkistus: vain admin voi ajaa vaarallisia komentoja.
-        # Bootstrap-adminit on jo käsitelty _check_user_access:ssa — he saavat
-        # aina admin-roolin upsert_user:n kautta.
         if not user or user.get("role") != "admin":
             logger.warning(
                 "Estetty DANGER-komento roolin takia: %s yritti %r (rooli: %s)",
@@ -468,3 +544,58 @@ def deny_user(email: str) -> Response:
     update_user_status(email, status="denied")
     logger.info("Käyttäjältä evätty pääsy: %s", email)
     return jsonify({"status": "denied", "email": email})
+
+
+@admin_bp.put("/linux/shell_policy")
+@require_auth
+def update_shell_policy() -> Response:
+    """Asettaa globaalin ShellCommand-policyn (mode ja allowlist)."""
+    body = request.get_json(silent=True) or {}
+    mode = body.get("mode")
+    allowlist = body.get("allowlist", [])
+
+    if mode not in ["disabled", "allowlist", "any"]:
+        return jsonify({"error": "Invalid mode. Must be: disabled, allowlist, any"}), 400
+
+    from .db import get_db
+    get_db().collection("linux_settings").document("shell_command_policy").set({
+        "mode": mode,
+        "allowlist": allowlist
+    })
+    logger.info("ShellCommand policy päivitetty: mode=%s", mode)
+    return jsonify({"status": "success", "mode": mode, "allowlist": allowlist})
+
+
+@admin_bp.put("/devices/<device_id>/shell_command_enabled")
+@require_auth
+def update_device_shell_enabled(device_id: str) -> Response:
+    """Asettaa per-laite-kohtaisen ShellCommand-sallinnan."""
+    body = request.get_json(silent=True) or {}
+    enabled = body.get("enabled", False)
+
+    device = get_linux_device(device_id)
+    if not device:
+        return jsonify({"error": "Laitetta ei löydy"}), 404
+
+    from .db import upsert_linux_device
+    upsert_linux_device(device_id, {"shell_command_enabled": enabled})
+    logger.info("Laitteen %s shell_command_enabled asetettu: %s", device_id, enabled)
+    return jsonify({"status": "success", "device_id": device_id, "shell_command_enabled": enabled})
+
+
+@admin_bp.post("/devices/<device_id>/rotate_token")
+@require_auth
+def rotate_token_admin(device_id: str) -> Response:
+    """Käynnistää manuaalisen tokenin rotaation laitteelle."""
+    platform = request.args.get("platform")
+    if platform != "linux":
+        return jsonify({"error": "Vain platform=linux on tuettu"}), 400
+
+    device = get_linux_device(device_id)
+    if not device:
+        return jsonify({"error": "Laitetta ei löydy"}), 404
+
+    from .db import upsert_linux_device
+    upsert_linux_device(device_id, {"pending_token_hash": "rotate"})
+    logger.info("Manuaalinen token-rotaatio pyydetty laitteelle %s", device_id)
+    return jsonify({"status": "rotation_requested", "device_id": device_id})
