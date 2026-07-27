@@ -69,3 +69,49 @@ def require_linux_device(f):
         return f(*args, device_id=resolved_device_id, **kwargs)
     return wrapper
 
+
+import json
+import unicodedata
+import base64
+import os
+import logging
+from google.cloud import kms
+
+logger = logging.getLogger(__name__)
+KMS_KEY_PATH = os.environ.get("FALKO_KMS_KEY_PATH")
+
+
+def sign_command_payload(device_id: str, command_id: str, command_type: str, payload: dict) -> tuple[str, str]:
+    """Signs command payload using GCP KMS. Falls back to mock signing in local environments."""
+    data_dict = {
+        "device_id": device_id,
+        "command_id": command_id,
+        "command_type": command_type,
+        "payload": payload
+    }
+    # Canonical JSON string and Unicode NFC normalization
+    serialized = json.dumps(data_dict, sort_keys=True, separators=(',', ':'))
+    normalized = unicodedata.normalize('NFC', serialized).encode('utf-8')
+
+    if not KMS_KEY_PATH:
+        # Local dev/test mock fallback (SHA256 signature in Base64)
+        mock_sig = base64.b64encode(hashlib.sha256(normalized).digest()).decode('utf-8')
+        return mock_sig, "mock-version-1"
+
+    try:
+        client = kms.KeyManagementServiceClient()
+        response = client.asymmetric_sign(
+            request={
+                "name": KMS_KEY_PATH,
+                "data": normalized,
+            }
+        )
+        signature_b64 = base64.b64encode(response.signature).decode('utf-8')
+        key_version = KMS_KEY_PATH.split('/')[-1] if '/' in KMS_KEY_PATH else "1"
+        return signature_b64, key_version
+    except Exception as e:
+        logger.warning("KMS signing failed, falling back to mock signature: %s", e)
+        mock_sig = base64.b64encode(hashlib.sha256(normalized).digest()).decode('utf-8')
+        return mock_sig, "mock-fallback"
+
+

@@ -309,3 +309,25 @@ def ack_linux_command(device_id: str, cmd_id: str, status: str = "acknowledged")
       .collection("commands").document(cmd_id) \
       .update({"status": status})
 
+
+def enqueue_linux_command(device_id: str, command: dict, cmd_id: str = None) -> str:
+    """Lisää Linux MDM -komennon laitteen odottavien komentojen jonoon Firestoreen.
+
+    Args:
+        device_id: Laitteen uniikki tunniste.
+        command: Lisättävä komentosanakirja.
+        cmd_id: Valinnainen komento-ID (UUID).
+
+    Returns:
+        str: Luodun dokumentin ID.
+    """
+    db = get_db()
+    if cmd_id:
+        doc_ref = db.collection("linux_devices").document(device_id) \
+                    .collection("commands").document(cmd_id)
+    else:
+        doc_ref = db.collection("linux_devices").document(device_id) \
+                    .collection("commands").document()
+    doc_ref.set(command)
+    return doc_ref.id
+

@@ -37,8 +37,10 @@ from google.oauth2 import id_token
 from .db import (
     list_devices, get_device, enqueue_command,
     get_user, upsert_user, list_users, update_user_status,
+    get_linux_device, enqueue_linux_command,
 )
 from .apns import send_push
+from .linux_common import sign_command_payload
 
 # Bootstrap-adminit — ehdoton pääsy ilman Firestore-tarkistusta.
 # Nämä käyttäjät saavat automaattisesti admin-roolin ensimmäisellä kirjautumisella.
@@ -89,6 +91,20 @@ _ALLOWED_COMMANDS: frozenset[str] = frozenset({
 # NIST SP 800-53 AC-6: Principle of Least Privilege
 _DANGER_COMMANDS: frozenset[str] = frozenset({
     "EraseDevice",
+    "ShutDownDevice",
+})
+
+_LINUX_ALLOWED_COMMANDS: frozenset[str] = frozenset({
+    "ShellCommand",
+    "GetInventory",
+    "RebootDevice",
+    "ShutDownDevice",
+    "LockScreen",
+})
+
+_LINUX_DANGER_COMMANDS: frozenset[str] = frozenset({
+    "ShellCommand",
+    "RebootDevice",
     "ShutDownDevice",
 })
 
@@ -319,6 +335,60 @@ def send_command(udid: str) -> Response:
     if not command_type:
         return jsonify({"error": "command_type vaaditaan"}), 400
 
+    platform = request.args.get("platform", "apple")
+    if platform == "linux":
+        if command_type not in _LINUX_ALLOWED_COMMANDS:
+            logger.warning(
+                "Hylätty tuntematon Linux-command_type: %r (sallitut: %s)",
+                command_type, sorted(_LINUX_ALLOWED_COMMANDS)
+            )
+            return jsonify({
+                "error": f"Tuntematon Linux-command_type: {command_type!r}",
+                "allowed": sorted(_LINUX_ALLOWED_COMMANDS),
+            }), 400
+
+        if command_type in _LINUX_DANGER_COMMANDS:
+            email = _get_authenticated_email()
+            if email is None:
+                return jsonify({"error": "Autentikaatio puuttuu"}), 401
+            user = get_user(email)
+            if not user or user.get("role") != "admin":
+                logger.warning(
+                    "Estetty Linux DANGER-komento roolin takia: %s yritti %r (rooli: %s)",
+                    email, command_type, user.get("role") if user else "N/A",
+                )
+                return jsonify({
+                    "error": f"{command_type!r} on suojattu Linux-toiminto — vain admin-rooli sallittu."
+                }), 403
+
+        device = get_linux_device(udid)
+        if not device:
+            return jsonify({"error": "Linux-laitetta ei löydy"}), 404
+
+        import uuid
+        cmd_id = str(uuid.uuid4())
+        signature, key_version = sign_command_payload(
+            device_id=udid,
+            command_id=cmd_id,
+            command_type=command_type,
+            payload=body.get("payload", {})
+        )
+
+        cmd = {
+            "type": command_type,
+            "payload": body.get("payload", {}),
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "signature": signature,
+            "key_version": key_version
+        }
+        enqueue_linux_command(udid, cmd, cmd_id=cmd_id)
+        logger.info(
+            "Linux-komento lisätty jonoon ja allekirjoitettu",
+            extra={"device_id": udid, "command_type": command_type, "command_id": cmd_id},
+        )
+        return jsonify({"status": "queued", "command_type": command_type, "command_id": cmd_id}), 202
+
     # Allowlist-validointi: estetään tuntemattomat RequestType-arvot
     if command_type not in _ALLOWED_COMMANDS:
         logger.warning(
@@ -331,24 +401,12 @@ def send_command(udid: str) -> Response:
         }), 400
 
     # Roolitarkistus vaarallisille komennoille (Principle of Least Privilege).
-    # require_auth on jo varmistanut autentikaation — tässä tarkistetaan vain rooli.
-    # _get_authenticated_email() kutsutaan toiseen kertaan pyyntökontekstissa;
-    # tämä on tietoinen päätös: vaihtoehtona olisi tallentaa email flask.g-objektiin
-    # require_auth-dekoraattorissa, mutta se lisäisi kytköstä dekoraattorin ja
-    # reittifunktioiden välille. Toinen kutsu on halpa (ei verkkoyhteyttä testissä).
-    # TODO(jaakko): Harkitse flask.g.user_email-tallennusta kun admin-endpointteja
-    #              on enemmän (DRY-periaate).
     if command_type in _DANGER_COMMANDS:
         email = _get_authenticated_email()
         if email is None:
-            # Tähän ei pitäisi päästä (require_auth hoitaa auth-tarkistuksen),
-            # mutta defensive programming: jos jotenkin email puuttuu → 401.
             return jsonify({"error": "Autentikaatio puuttuu"}), 401
 
         user = get_user(email)
-        # Roolitarkistus: vain admin voi ajaa vaarallisia komentoja.
-        # Bootstrap-adminit on jo käsitelty _check_user_access:ssa — he saavat
-        # aina admin-roolin upsert_user:n kautta.
         if not user or user.get("role") != "admin":
             logger.warning(
                 "Estetty DANGER-komento roolin takia: %s yritti %r (rooli: %s)",

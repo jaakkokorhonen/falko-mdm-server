@@ -1,0 +1,34 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Deny all public read/write access by default.
+    // Access is strictly limited to backend service accounts (which bypass rules as admin).
+    // ISO 27001 Control A.9.4.1 (Information access restriction).
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Apple MDM devices & commands
+    match /devices/{udid} {
+      allow read, write: if false;
+      
+      match /commands/{cmd_id} {
+        allow read, write: if false;
+      }
+    }
+
+    // Linux MDM devices & commands
+    match /linux_devices/{device_id} {
+      allow read, write: if false;
+      
+      match /commands/{cmd_id} {
+        allow read, write: if false;
+      }
+    }
+
+    // Authorized Admin users
+    match /users/{email} {
+      allow read, write: if false;
+    }
+  }
+}

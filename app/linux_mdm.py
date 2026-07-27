@@ -29,7 +29,7 @@ from .db import (
     dequeue_linux_command,
     upsert_linux_device,
 )
-from .linux_common import require_linux_device
+from .linux_common import require_linux_device, KMS_KEY_PATH
 
 linux_mdm_bp = Blueprint("linux_mdm", __name__)
 logger = logging.getLogger(__name__)
@@ -66,7 +66,9 @@ def linux_mdm(device_id: str):
         command_payload = {
             "id": cmd_id,
             "type": cmd_dict.get("type"),
-            "payload": cmd_dict.get("payload", {})
+            "payload": cmd_dict.get("payload", {}),
+            "signature": cmd_dict.get("signature"),
+            "key_version": cmd_dict.get("key_version")
         }
         logger.info("Dispatched command %s to device %s", cmd_id, device_id)
 
@@ -76,3 +78,27 @@ def linux_mdm(device_id: str):
             "latest_agent_version": SERVER_AGENT_VERSION
         }
     }), 200
+
+
+@linux_mdm_bp.get("/linux/command-signing-pubkey")
+def get_signing_pubkey():
+    """Palauttaa KMS-avaimen julkisen avaimen PEM-muodossa agentille."""
+    if not KMS_KEY_PATH:
+        # Paikallinen mock-avain kehitykseen ja testaukseen
+        mock_pem = (
+            "-----BEGIN PUBLIC KEY-----\n"
+            "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE13f5yW4Tevc4Yx0W7LqLlhf7pI+a\n"
+            "0K/V3q6r9M8Z87f4l82s7X9+8x5k+q8e+0g0w8x8d/1o5z8A8y8Y0+3+4w==\n"
+            "-----END PUBLIC KEY-----"
+        )
+        return jsonify({"public_key": mock_pem, "key_version": "mock-version-1"})
+
+    try:
+        from google.cloud import kms
+        client = kms.KeyManagementServiceClient()
+        pubkey = client.get_public_key(request={"name": KMS_KEY_PATH})
+        return jsonify({"public_key": pubkey.pem, "key_version": pubkey.name.split('/')[-1]})
+    except Exception as e:
+        logger.error("Failed to fetch KMS public key: %s", e)
+        return jsonify({"error": "Failed to fetch public key"}), 500
+
