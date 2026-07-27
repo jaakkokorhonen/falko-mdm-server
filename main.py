@@ -17,6 +17,8 @@ from flask_cors import CORS
 from app.mdm import mdm_bp
 from app.checkin import checkin_bp
 from app.admin import admin_bp
+from app.linux_checkin import linux_checkin_bp
+from app.linux_mdm import linux_mdm_bp
 from app.middleware import register_middleware
 
 logging.basicConfig(
@@ -55,6 +57,8 @@ def create_app() -> Flask:
     app.register_blueprint(mdm_bp)
     app.register_blueprint(checkin_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(linux_checkin_bp)
+    app.register_blueprint(linux_mdm_bp)
 
     register_middleware(app)
 

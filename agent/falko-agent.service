@@ -1,1 +1,22 @@
-# systemd unit file for falko-agent
+[Unit]
+Description=Falko MDM Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=falko
+Group=falko
+ExecStart=/usr/bin/python3 /opt/falko-agent/agent.py
+Restart=on-failure
+RestartSec=60
+EnvironmentFile=-/etc/falko/agent.env
+ReadOnlyPaths=/
+ReadWritePaths=/opt/falko-agent /etc/falko /tmp
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

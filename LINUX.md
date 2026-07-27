@@ -315,6 +315,7 @@ All commands return `{"status": "acknowledged"|"error", "output": str, "exit_cod
 | `poll_interval` | `FALKO_POLL_INTERVAL` | `900` |
 | `token_path` | `FALKO_TOKEN_PATH` | `/etc/falko/device.token` |
 | `log_level` | `FALKO_LOG_LEVEL` | `INFO` |
+| `conf_path` | `FALKO_CONF_PATH` | `/etc/falko/agent.conf` |
 
 **falko-agent.service:**
 ```ini
@@ -325,11 +326,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=falko
+Group=falko
 ExecStart=/usr/bin/python3 /opt/falko-agent/agent.py
 Restart=on-failure
 RestartSec=60
 EnvironmentFile=-/etc/falko/agent.env
+ReadOnlyPaths=/
+ReadWritePaths=/opt/falko-agent /etc/falko /tmp
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target

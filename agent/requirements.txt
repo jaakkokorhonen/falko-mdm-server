@@ -1,1 +1,2 @@
-requests
+requests>=2.31.0,<3
+# prod: cryptography>=42.0.0,<43 # required for command signature verification (issue #44)
