@@ -13,6 +13,8 @@ import app.db as db
 import app.linux_common as linux_common
 from agent.agent import verify_command_signature, is_command_replay
 
+os.environ["FALKO_TEST_MODE"] = "1"
+
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
@@ -213,7 +215,6 @@ def test_linux_token_rotation_and_shell_policy(client, clean_sqlite_db, mocker):
 
     mocker.patch("app.linux_common.get_linux_device", side_effect=mock_get_linux_device)
     mocker.patch("app.linux_checkin.get_linux_device", side_effect=mock_get_linux_device)
-    mocker.patch("app.linux_mdm.get_linux_device", side_effect=mock_get_linux_device)
     mocker.patch("app.linux_mdm.upsert_linux_device", side_effect=mock_upsert_linux_device)
     mocker.patch("app.linux_common.upsert_linux_device", side_effect=mock_upsert_linux_device)
     mocker.patch("app.admin.get_linux_device", side_effect=mock_get_linux_device)

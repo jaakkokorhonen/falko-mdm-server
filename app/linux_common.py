@@ -113,7 +113,12 @@ def require_linux_device(f):
 
         g.device = device
         g.device_id = resolved_device_id
-        return f(*args, device_id=resolved_device_id, **kwargs)
+
+        import inspect
+        sig = inspect.signature(f)
+        if "device_id" in sig.parameters:
+            return f(*args, device_id=resolved_device_id, **kwargs)
+        return f(*args, **kwargs)
     return wrapper
 
 
@@ -129,6 +134,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 KMS_KEY_PATH: str | None = os.environ.get("FALKO_KMS_KEY_PATH")
+
+_kms_client = None
+
+def _get_kms_client():
+    """Palauttaa jaettavan thread-safe KMS-asiakasolion (Singleton pattern)."""
+    global _kms_client
+    if _kms_client is None:
+        from google.cloud import kms
+        _kms_client = kms.KeyManagementServiceClient()
+    return _kms_client
 
 
 def sign_command_payload(
@@ -175,16 +190,26 @@ def sign_command_payload(
         return mock_sig, "mock-version-1"
 
     try:
-        from google.cloud import kms
-        client = kms.KeyManagementServiceClient()
+        client = _get_kms_client()
+        key_version_name = KMS_KEY_PATH
+        if "/cryptoKeyVersions/" not in KMS_KEY_PATH:
+            try:
+                key_obj = client.get_crypto_key(request={"name": KMS_KEY_PATH})
+                if key_obj.primary:
+                    key_version_name = key_obj.primary.name
+                else:
+                    key_version_name = f"{KMS_KEY_PATH}/cryptoKeyVersions/1"
+            except Exception:
+                key_version_name = f"{KMS_KEY_PATH}/cryptoKeyVersions/1"
+
         response = client.asymmetric_sign(
             request={
-                "name": KMS_KEY_PATH,
+                "name": key_version_name,
                 "data": normalized,
             }
         )
         signature_b64 = base64.b64encode(response.signature).decode('utf-8')
-        key_version = KMS_KEY_PATH.split('/')[-1] if '/' in KMS_KEY_PATH else "1"
+        key_version = key_version_name.split('/')[-1] if '/' in key_version_name else "1"
         return signature_b64, key_version
     except Exception as e:
         # Tuotannossa KMS-virhe on kriittinen — ei sallita fallbackia.

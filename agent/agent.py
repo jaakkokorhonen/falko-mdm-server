@@ -212,9 +212,12 @@ def verify_command_signature(device_id: str, command: dict, pubkey_pem: str) -> 
     )
 
     if key_version and key_version.startswith("mock"):
+        if os.environ.get("FALKO_TEST_MODE") != "1":
+            logger.error("Mock signatures are strictly disallowed in production mode.")
+            return False
         mock_sig = base64.b64encode(hashlib.sha256(normalized).digest()).decode('utf-8')
         if signature_b64 == mock_sig:
-            logger.info("Mock signature verified successfully.")
+            logger.info("Mock signature verified successfully (test mode).")
             return True
         logger.error("Mock signature mismatch.")
         return False

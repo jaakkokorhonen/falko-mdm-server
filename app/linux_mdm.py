@@ -37,6 +37,7 @@ from .linux_common import (
     hash_token,
     TOKEN_GRACE_PERIOD_SECONDS,
     TOKEN_ROTATION_DAYS,
+    _get_kms_client,
 )
 
 linux_mdm_bp = Blueprint("linux_mdm", __name__)
@@ -51,9 +52,7 @@ _TOKEN_ROTATION_SECONDS = TOKEN_ROTATION_DAYS * 24 * 3600
 @require_linux_device
 def linux_mdm(device_id: str):
     """Käsittelee agentin komentokyselyn (poll) ja edellisen komennon kuittauksen (ack)."""
-    # Päivitetään viimeisin aktiivisuustieto (last_seen).
-    # ISO 27001 Audit Evidence: Laitteen aktiivisuuden seuranta.
-    upsert_linux_device(device_id, {"last_seen": firestore.SERVER_TIMESTAMP})
+    db_updates = {"last_seen": firestore.SERVER_TIMESTAMP}
 
     device = g.device
     token_issued_at = device.get("token_issued_at")
@@ -77,7 +76,7 @@ def linux_mdm(device_id: str):
                 "Token rotation grace period expired for device %s — marking token_rotation_failed",
                 device_id,
             )
-            upsert_linux_device(device_id, {
+            db_updates.update({
                 "pending_token_hash": None,
                 "pending_token_issued_at": None,
                 "token_rotation_failed": True,
@@ -97,13 +96,16 @@ def linux_mdm(device_id: str):
 
     if should_rotate:
         new_token_plaintext = secrets.token_urlsafe(32)
-        upsert_linux_device(device_id, {
+        db_updates.update({
             "pending_token_hash": hash_token(new_token_plaintext),
             "pending_token_issued_at": now,
             "rotation_requested": False,
             "token_rotation_failed": False,
         })
         logger.info("Triggered token rotation for device %s", device_id)
+
+    # Suoritetaan yhdistetty Firestore-kirjoitus (säästää yhden RPC-kutsun per poll)
+    upsert_linux_device(device_id, db_updates)
 
     payload = request.get_json(silent=True) or {}
     last_result = payload.get("result")
@@ -159,9 +161,19 @@ def get_signing_pubkey():
         return jsonify({"public_key": mock_pem, "key_version": "mock-version-1"})
 
     try:
-        from google.cloud import kms
-        client = kms.KeyManagementServiceClient()
-        pubkey = client.get_public_key(request={"name": KMS_KEY_PATH})
+        client = _get_kms_client()
+        key_version_name = KMS_KEY_PATH
+        if "/cryptoKeyVersions/" not in KMS_KEY_PATH:
+            try:
+                key_obj = client.get_crypto_key(request={"name": KMS_KEY_PATH})
+                if key_obj.primary:
+                    key_version_name = key_obj.primary.name
+                else:
+                    key_version_name = f"{KMS_KEY_PATH}/cryptoKeyVersions/1"
+            except Exception:
+                key_version_name = f"{KMS_KEY_PATH}/cryptoKeyVersions/1"
+
+        pubkey = client.get_public_key(request={"name": key_version_name})
         return jsonify({"public_key": pubkey.pem, "key_version": pubkey.name.split('/')[-1]})
     except Exception as e:
         logger.error("Failed to fetch KMS public key: %s", e)
