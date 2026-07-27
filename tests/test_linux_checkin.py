@@ -214,3 +214,25 @@ def test_linux_enroll_expired(client, mocker):
     assert response.status_code == 401
     assert "expired" in response.get_json()["error"]
 
+
+from app.linux_common import sign_command_payload
+
+@pytest.mark.regression
+def test_sign_command_payload_kms_error(mocker):
+    """Verify that sign_command_payload raises RuntimeError if KMS client fails in production."""
+    # Set KMS_KEY_PATH temporarily to simulate production
+    mocker.patch("app.linux_common.KMS_KEY_PATH", "projects/p/locations/l/keyRings/k/cryptoKeys/key")
+    
+    # Mock KeyManagementServiceClient to raise an exception
+    class MockKMSClient:
+        def get_crypto_key(self, request):
+            raise Exception("KMS unavailable")
+            
+    mocker.patch("google.cloud.kms.KeyManagementServiceClient", return_value=MockKMSClient())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        sign_command_payload("dev-1", "cmd-1", "ShellCommand", {"command": "echo"})
+    
+    assert "Command signing unavailable" in str(exc_info.value)
+
+
