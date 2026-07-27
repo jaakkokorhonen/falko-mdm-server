@@ -362,17 +362,21 @@ def send_command(udid: str) -> Response:
     if not device:
         return jsonify({"error": "Laitetta ei löydy"}), 404
 
+    # ISO 27001 Audit Evidence (Q12): Tallennetaan operaattorin email komentotietueeseen ja lokeihin.
+    email = _get_authenticated_email() or "unknown-operator"
+
     cmd = {
         "command_type": command_type,
         "payload": body.get("payload", {}),
         "status": "pending",
         # ISO 8601 UTC -aikaleima järjestystä varten dequeue_command-kyselyssä
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "operator_email": email,
     }
     enqueue_command(udid, cmd)
     logger.info(
         "Komento lisätty jonoon",
-        extra={"udid": udid, "command_type": command_type},
+        extra={"udid": udid, "command_type": command_type, "operator_email": email},
     )
 
     return jsonify({"status": "queued", "command_type": command_type}), 202

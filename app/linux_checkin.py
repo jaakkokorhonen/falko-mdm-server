@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from flask import Blueprint, jsonify, request
 from .db import get_linux_device, upsert_linux_device
-from .linux_common import _DEVICE_ID_RE, hash_token
+from .linux_common import _DEVICE_ID_RE, verify_token
 
 linux_checkin_bp = Blueprint("linux_checkin", __name__)
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def linux_checkin():
         return jsonify({"status": "error", "message": "Device not enrolled"}), 404
 
     stored_hash = device.get("token_hash")
-    if not stored_hash or hash_token(token) != stored_hash:
+    if not verify_token(token, stored_hash):
         logger.warning("Unauthorized check-in attempt for device %s (token mismatch).", device_id)
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 

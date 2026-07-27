@@ -20,7 +20,7 @@ from .db import (
     get_linux_device,
     upsert_linux_device,
 )
-from .linux_common import _DEVICE_ID_RE, hash_token
+from .linux_common import _DEVICE_ID_RE, verify_token
 
 linux_mdm_bp = Blueprint("linux_mdm", __name__)
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ def linux_mdm(device_id: str):
         return jsonify({"status": "error", "message": "Device not enrolled"}), 404
 
     stored_hash = device.get("token_hash")
-    if not stored_hash or hash_token(token) != stored_hash:
+    if not verify_token(token, stored_hash):
         logger.warning("Unauthorized MDM poll attempt for device %s (token mismatch).", device_id)
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
