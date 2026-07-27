@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 SERVER_AGENT_VERSION = os.environ.get("FALKO_LATEST_AGENT_VERSION", "0.1.0")
 
+_GRACE_PERIOD_SECONDS = 24 * 3600  # 24 h
+
 
 @linux_mdm_bp.put("/linux/mdm/<device_id>")
 @require_linux_device
@@ -45,22 +47,48 @@ def linux_mdm(device_id: str):
     """Käsittelee agentin komentokyselyn (poll) ja edellisen komennon kuittauksen (ack)."""
     # Päivitetään viimeisin aktiivisuustieto (last_seen).
     # ISO 27001 Audit Evidence: Laitteen aktiivisuuden seuranta.
-    # Käytetään Firestore SERVER_TIMESTAMP -muuttujaa luotettavan palvelinpohjaisen aikaleiman saamiseksi.
     upsert_linux_device(device_id, {"last_seen": firestore.SERVER_TIMESTAMP})
 
     # Tarkistetaan rotaatiotarve (Issue #58)
     device = g.device
     token_issued_at = device.get("token_issued_at")
     pending_token_hash = device.get("pending_token_hash")
+    pending_token_issued_at = device.get("pending_token_issued_at")
     rotation_requested = device.get("rotation_requested", False)
 
     new_token_plaintext = None
-    should_rotate = rotation_requested
+    now = datetime.now(timezone.utc)
 
+    # --- Grace period -invalidaatio (#58) ---
+    # Jos pending_token_issued_at on yli 24 h vanha eikä agentti ole kuittannut
+    # uutta tokenia, rotaatio on epäonnistunut. Merkitään laite token_rotation_failed
+    # -tilaan ja poistetaan pending-token. Cloud Monitoring hälyttää tästä tilasta.
+    if pending_token_hash and pending_token_issued_at:
+        if pending_token_issued_at.tzinfo is None:
+            pending_token_issued_at = pending_token_issued_at.replace(tzinfo=timezone.utc)
+        age = (now - pending_token_issued_at).total_seconds()
+        if age > _GRACE_PERIOD_SECONDS:
+            logger.error(
+                "Token rotation grace period expired for device %s — marking token_rotation_failed",
+                device_id,
+            )
+            upsert_linux_device(device_id, {
+                "pending_token_hash": None,
+                "pending_token_issued_at": None,
+                "token_rotation_failed": True,
+            })
+            # Päivitetään paikallinen device-dict jotta alla oleva rotaatiotarkistus
+            # ei yritä uutta rotaatiota välittömästi
+            device["pending_token_hash"] = None
+            device["pending_token_issued_at"] = None
+            pending_token_hash = None
+            pending_token_issued_at = None
+
+    # --- Uuden rotaation käynnistys ---
+    should_rotate = rotation_requested
     if not should_rotate and token_issued_at and not pending_token_hash:
         if token_issued_at.tzinfo is None:
             token_issued_at = token_issued_at.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
         if (now - token_issued_at).total_seconds() > 30 * 24 * 3600:
             should_rotate = True
 
@@ -68,8 +96,9 @@ def linux_mdm(device_id: str):
         new_token_plaintext = secrets.token_urlsafe(32)
         upsert_linux_device(device_id, {
             "pending_token_hash": hash_token(new_token_plaintext),
-            "pending_token_issued_at": datetime.now(timezone.utc),
-            "rotation_requested": False
+            "pending_token_issued_at": now,
+            "rotation_requested": False,
+            "token_rotation_failed": False,
         })
         logger.info("Triggered token rotation for device %s", device_id)
 
@@ -132,4 +161,3 @@ def get_signing_pubkey():
     except Exception as e:
         logger.error("Failed to fetch KMS public key: %s", e)
         return jsonify({"error": "Failed to fetch public key"}), 500
-
