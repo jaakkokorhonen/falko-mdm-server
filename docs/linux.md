@@ -110,7 +110,7 @@ Issues: [#38][i38] [#39][i39] [#40][i40] [#41][i41] [#42][i42] [#43][i43]
 
 | Item | Description |
 |---|---|
-| Command signing | Admin signs command payload with GCP KMS asymmetric key; agent verifies before execution. Prevents arbitrary RCE via compromised server credentials. Includes device_id and command_id in signed data to prevent replay attacks. Uses Unicode NFC normalization for determinism. |
+| Command signing | **Implemented**. Admin signs command payload with GCP KMS asymmetric key; agent verifies before execution. Prevents arbitrary RCE via compromised server credentials. Includes device_id and command_id in signed data to prevent replay attacks. Uses Unicode NFC normalization for determinism. |
 | Device token rotation | Tokens auto-rotate every 30 days. Agent fetches new token on next successful poll; server invalidates old token after grace period. |
 | Rate limiting on device endpoints | Cloud Armor or middleware: max 10 req/min per `device_id` on `/linux/checkin` and `/linux/mdm/*`. |
 | mTLS for agent–server channel | **Bypassed (Decided not to implement)**. Bearer token auth is retained with timing-safe secrets.compare_digest validation, combined with KMS command signing for RCE protection, removing the need for GCP CAS and Load Balancer complexity. |

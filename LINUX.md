@@ -358,19 +358,22 @@ WantedBy=multi-user.target
 
 ### Out of Scope in MVP
 
-These items are explicitly deferred to the production phase (see [Production Design](#production-design)):
+These items are deferred or bypassed in the MVP phase (see [Production Design](#production-design)):
 
-- mTLS client certificate authentication
-- GCP KMS command signing
-- FCM push wake-up (agent polls on interval)
+- mTLS client certificate authentication (Bypassed)
+- FCM push wake-up (Bypassed)
 - Agent auto-update mechanism
 - `dnf` / `zypper` package manager support (apt/Ubuntu only in MVP)
 - `InstallPackage` / `RemovePackage` command types
 - Redis-backed distributed rate limiting
-- Structured JSON logging to Cloud Logging
-- Firestore security rules for `linux_devices`
-- End-to-end integration test suite
 - Windows or macOS agent
+
+The following production controls are fully implemented in the current release:
+- GCP KMS command signing (EC_SIGN_P256_SHA256) & signature verification
+- SQLite command replay protection database on the agent
+- Firestore security rules denying direct client access
+- Log-based metrics and Cloud Monitoring alert policies for security violations
+- End-to-end integration test suite (enroll -> check-in -> signed command -> ack)
 
 ---
 
