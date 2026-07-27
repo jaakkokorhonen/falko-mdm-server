@@ -228,7 +228,7 @@ This is a sound design that has not yet been built. It must be implemented befor
 
 ## Competitor benchmarking and recommended solutions
 
-> This section compares Falko's current and planned controls against Fleet (open-source), Fleet Premium, Microsoft Intune Linux, and Jamf Pro (macOS reference), and recommends concrete solutions that bring Falko to parity or better.
+> This section compares Falko's current and planned controls against Fleet (open-source), Fleet Premium, and Microsoft Intune Linux, and recommends concrete solutions that bring Falko to parity or better.
 
 ### How competitors solve each open problem
 
@@ -238,7 +238,7 @@ This is a sound design that has not yet been built. It must be implemented befor
 
 **Fleet Premium** goes further with TPM-bound host identity certificates (Linux kernel 4.12+, TPM 2.0 required). The private key is generated inside the TPM and never leaves the chip. The server can enforce `require_http_message_signature`, rejecting any request not signed by the TPM-bound key. This makes token theft and identity spoofing cryptographically infeasible without physical hardware access.
 
-**Microsoft Intune Linux** registers devices with an Azure AD device token, providing identity that is tied to the organizational directory rather than a local file.
+**Microsoft Intune Linux** supports limited Linux enrollment (Ubuntu, RHEL) for compliance reporting and basic policy. However, it does **not** register Linux devices as full Azure AD device objects in the same way as Windows or macOS devices. Linux devices appear in Intune as compliance-managed endpoints, not as directory-joined identities. This is a meaningful distinction from Intune's Windows behavior and should not be conflated with Azure AD-based device identity.
 
 **Recommended solution for Falko:**
 
@@ -280,15 +280,19 @@ def verify_device_token(provided_token: str, stored_hash: str) -> bool:
 
 Replace the current placeholder comment with this implementation. Both hashes are the same length (64 hex chars), so `compare_digest` operates in constant time.
 
-#### Agent tamper protection
+#### Agent tamper protection on Linux
 
-**Microsoft Defender for Endpoint** implements kernel-level tamper protection: the agent registers a kernel callback that blocks `SIGKILL` and file writes to agent directories even from root processes. This is not achievable in Python without a kernel module.
+No Linux MDM product — including Microsoft Defender for Endpoint Linux, Fleet, or Jamf Pro Linux — implements kernel-level blocking of `SIGKILL` or root-initiated process termination on Linux. This is a structural limitation of the Linux security model, not a product choice.
 
-**Fleet** does not implement kernel-level tamper protection in either tier. It accepts this as a known limitation and compensates with aggressive heartbeat monitoring (configurable down to 30 s) and automated device quarantine on missed check-ins.
+**Why kernel-level tamper protection does not exist for Linux agents:** On Windows, products like Defender use Windows Filtering Platform (WFP) and kernel patch guard callbacks that are specific to the Windows kernel architecture. On Linux, no equivalent stable, distribution-portable API exists for blocking root-level process signals. `fanotify` and eBPF (used by Defender for Endpoint Linux and others) provide file event monitoring and syscall tracing, but they cannot prevent a root process from sending `SIGKILL` to the agent or removing its files — they can only observe and report.
+
+The conclusion is that **all Linux MDM agents share this fundamental limitation**. The comparison to Windows Defender tamper protection is not applicable because Windows and Linux have fundamentally different kernel security architectures.
+
+**What Defender for Endpoint Linux actually does** for self-protection: it uses `fanotify` to monitor its own file paths and can log tampering attempts, and relies on systemd service restart policies for process recovery. This is the same approach available to Falko.
 
 **Recommended solutions for Falko** (layered, in priority order):
 
-1. **`/etc/sudoers.d/falko-agent`** — drop a sudoers snippet at enrollment that prevents the `falko` group and any non-root user from stopping or disabling the `falko-agent` service. This is low effort and eliminates the most common bypass:
+1. **`/etc/sudoers.d/falko-agent`** — drop a sudoers snippet at enrollment that prevents non-root users from stopping or disabling the `falko-agent` service. This eliminates the most common bypass by a non-root user with sudo access:
     ```
     # /etc/sudoers.d/falko-agent
     # Prevent unprivileged users from stopping the MDM agent
@@ -299,7 +303,7 @@ Replace the current placeholder comment with this implementation. Both hashes ar
 
 2. **Heartbeat-loss alert** — server side: if a device has not checked in within `poll_interval * 3` seconds, emit a Cloud Monitoring alert and mark the device as `status: offline` in Firestore. This matches Fleet's detection model and gives the security team visibility within minutes rather than hours.
 
-3. **`systemd-sysext` immutable overlay (v2+)** — package the agent as a `systemd-sysext` extension image. Extension images are read-only overlays on `/usr` and `/opt`, making file modification impossible without root access to the raw extension image file. This raises the bypass bar significantly beyond a simple `sudo systemctl stop`.
+3. **`systemd-sysext` immutable overlay (v2+)** — package the agent as a `systemd-sysext` extension image. Extension images are read-only overlays on `/usr` and `/opt`, making file modification impossible without root access to the raw extension image file. This raises the bypass bar significantly beyond a simple service stop.
 
 4. **TPM-sealed config (v3+)** — seal the server URL and token to the TPM with PCR values representing the boot state. If the boot chain is altered (kernel replaced, agent files tampered), the TPM unsealing fails and the agent cannot authenticate. This is the highest assurance level available on Linux without a kernel module.
 
@@ -349,11 +353,15 @@ Server stores `KMS.encrypt(recovery_key)` in Firestore, never plaintext. Wipe co
 
 ### Competitor parity matrix
 
+> **Note on Intune Linux:** Intune Linux enrollment provides compliance reporting and basic policy (Ubuntu, RHEL). It does not register Linux devices as full Azure AD device objects. The device identity column reflects this limited scope.
+>
+> **Note on kernel-level tamper protection:** No Linux MDM product implements kernel-level blocking of root-initiated agent termination. This row reflects a structural Linux limitation, not a per-product gap. The comparison to Windows Defender tamper protection is not applicable.
+
 | Control | Fleet free | Fleet Premium | Intune Linux | Falko MVP | Falko recommended |
 |---|---|---|---|---|---|
-| Server-issued device identity | ✅ node_key | ✅ TPM cert | ✅ Azure AD | ❌ client hash | ✅ server UUID → mTLS cert |
+| Server-issued device identity | ✅ node_key | ✅ TPM cert | ⚠️ compliance only, not full Azure AD join | ❌ client hash | ✅ server UUID → mTLS cert |
 | Timing-safe token comparison | ✅ | ✅ | ✅ | ❌ placeholder | ✅ `secrets.compare_digest` |
-| Kernel-level tamper protection | ❌ | ❌ | ❌ | ❌ | ❌ (not feasible in Python) |
+| Kernel-level tamper protection (Linux) | ❌ not possible | ❌ not possible | ❌ not possible | ❌ not possible | ❌ not possible on Linux |
 | sudoers-based stop restriction | ❌ | ❌ | ❌ | ❌ | ✅ sudoers snippet at enrollment |
 | Heartbeat-loss alerting | ✅ 30 s min | ✅ | ✅ | ❌ | ✅ Cloud Monitoring alert |
 | Update signing | ✅ TUF | ✅ TUF | ✅ pkg signature | ❌ planned | ✅ Ed25519 pinned key |
@@ -368,10 +376,10 @@ Ordered by security impact vs. implementation effort:
 1. **Immediate (before any staging deployment):** Implement `secrets.compare_digest` token validation. Zero dependencies, ~10 lines of code, closes a critical authentication gap.
 2. **Before first real device enrollment:** Server-issued device UUID at enrollment. Eliminates identity collision and VM clone risks.
 3. **Sprint 1 post-MVP:** Heartbeat-loss Cloud Monitoring alert + device `status: offline` flag. Provides detection for agent bypass without kernel-level enforcement.
-4. **Sprint 1 post-MVP:** sudoers snippet deployment via enrollment script. Raises bypass bar for non-technical users.
+4. **Sprint 1 post-MVP:** sudoers snippet deployment via enrollment script. Raises bypass bar for non-root users with sudo.
 5. **Sprint 2:** Ed25519 update signing in bootstrap script and `executor.py` update handler.
 6. **Sprint 2:** LUKS key escrow in enrollment script + `/linux/escrow` server endpoint + KMS wrapper.
 7. **Sprint 2:** Exponential backoff with jitter in `agent.py` poll loop.
-8. **Sprint 3:** GitHub Actions CI with `pytest`, `bandit`, `pip-audit`, and a gate that blocks merge if `secrets.compare_digest` placeholder is absent.
+8. **Sprint 3:** GitHub Actions CI with `pytest`, `bandit`, `pip-audit`, and a gate that blocks merge if token validation placeholder is absent.
 9. **v2 (optional, high assurance):** mTLS client certificates via GCP CA Service, replacing Bearer token entirely.
 10. **v3 (optional, highest assurance):** TPM-sealed config and identity on supported hardware.
