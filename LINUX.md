@@ -98,9 +98,8 @@ The Linux plane reuses the same Firestore database, the same OIDC-protected admi
 | `agent_version` | string | Semver of installed agent |
 | `token_hash` | string | SHA-256 of device bearer token |
 | `token_issued_at` | timestamp | Timestamp of when the active token was issued |
-| `pending_token_hash` | string | SHA-256 of new token during rotation |
-| `pending_token_issued_at` | timestamp | Timestamp of when rotation was started |
-| `rotation_requested` | bool | Flag to trigger manual rotation on next poll |
+| `pending_token_hash` | string | SHA-256 of new token during rotation, or "rotate" to request manual rotation |
+| `rotation_started_at` | timestamp | Timestamp of when rotation was started |
 | `shell_command_enabled` | bool | Per-device ShellCommand gating policy flag |
 | `fcm_token` | string | FCM registration token (prod) |
 
