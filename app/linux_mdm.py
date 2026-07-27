@@ -29,7 +29,9 @@ from .db import (
     dequeue_linux_command,
     upsert_linux_device,
 )
-from .linux_common import require_linux_device, KMS_KEY_PATH
+from datetime import datetime, timezone
+import secrets
+from .linux_common import require_linux_device, KMS_KEY_PATH, hash_token
 
 linux_mdm_bp = Blueprint("linux_mdm", __name__)
 logger = logging.getLogger(__name__)
@@ -45,6 +47,31 @@ def linux_mdm(device_id: str):
     # ISO 27001 Audit Evidence: Laitteen aktiivisuuden seuranta.
     # Käytetään Firestore SERVER_TIMESTAMP -muuttujaa luotettavan palvelinpohjaisen aikaleiman saamiseksi.
     upsert_linux_device(device_id, {"last_seen": firestore.SERVER_TIMESTAMP})
+
+    # Tarkistetaan rotaatiotarve (Issue #58)
+    device = g.device
+    token_issued_at = device.get("token_issued_at")
+    pending_token_hash = device.get("pending_token_hash")
+    rotation_requested = device.get("rotation_requested", False)
+
+    new_token_plaintext = None
+    should_rotate = rotation_requested
+
+    if not should_rotate and token_issued_at and not pending_token_hash:
+        if token_issued_at.tzinfo is None:
+            token_issued_at = token_issued_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if (now - token_issued_at).total_seconds() > 30 * 24 * 3600:
+            should_rotate = True
+
+    if should_rotate:
+        new_token_plaintext = secrets.token_urlsafe(32)
+        upsert_linux_device(device_id, {
+            "pending_token_hash": hash_token(new_token_plaintext),
+            "pending_token_issued_at": datetime.now(timezone.utc),
+            "rotation_requested": False
+        })
+        logger.info("Triggered token rotation for device %s", device_id)
 
     payload = request.get_json(silent=True) or {}
     last_result = payload.get("result")
@@ -72,11 +99,15 @@ def linux_mdm(device_id: str):
         }
         logger.info("Dispatched command %s to device %s", cmd_id, device_id)
 
+    server_meta = {
+        "latest_agent_version": SERVER_AGENT_VERSION
+    }
+    if new_token_plaintext:
+        server_meta["new_token"] = new_token_plaintext
+
     return jsonify({
         "command": command_payload,
-        "server_meta": {
-            "latest_agent_version": SERVER_AGENT_VERSION
-        }
+        "server_meta": server_meta
     }), 200
 
 

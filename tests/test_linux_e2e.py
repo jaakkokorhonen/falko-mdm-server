@@ -184,3 +184,143 @@ def test_linux_e2e_flow(client, clean_sqlite_db, mocker):
     
     # Check command status in DB is acknowledged
     assert commands_store[0]["status"] == "acknowledged"
+
+
+from datetime import datetime, timezone, timedelta
+
+@pytest.mark.regression
+def test_linux_token_rotation_and_shell_policy(client, clean_sqlite_db, mocker):
+    device_id = "b" * 64
+    raw_token = "original-secret-token"
+    token_hash = linux_common.hash_token(raw_token)
+
+    # Store mocked device data
+    device_store = {
+        device_id: {
+            "device_id": device_id,
+            "token_hash": token_hash,
+            "token_issued_at": datetime.now(timezone.utc) - timedelta(days=31),
+            "shell_command_enabled": False
+        }
+    }
+
+    settings_store = {
+        "shell_command_policy": {
+            "mode": "disabled",
+            "allowlist": ["apt-get update"]
+        }
+    }
+
+    def mock_get_linux_device(did):
+        return device_store.get(did)
+
+    def mock_upsert_linux_device(did, data):
+        if did not in device_store:
+            device_store[did] = {}
+        device_store[did].update(data)
+
+    mocker.patch("app.linux_common.get_linux_device", side_effect=mock_get_linux_device)
+    mocker.patch("app.linux_checkin.get_linux_device", side_effect=mock_get_linux_device)
+    mocker.patch("app.linux_mdm.get_linux_device", side_effect=mock_get_linux_device)
+    mocker.patch("app.linux_mdm.upsert_linux_device", side_effect=mock_upsert_linux_device)
+    mocker.patch("app.linux_common.upsert_linux_device", side_effect=mock_upsert_linux_device)
+    mocker.patch("app.admin.get_linux_device", side_effect=mock_get_linux_device)
+    mocker.patch("app.admin.upsert_linux_device", side_effect=mock_upsert_linux_device)
+    mocker.patch("app.admin.enqueue_linux_command")
+
+    class MockDoc:
+        def __init__(self, data, exists=True):
+            self.data = data
+            self.exists = exists
+        def to_dict(self):
+            return self.data
+
+    class MockCollection:
+        def __init__(self, name):
+            self.name = name
+        def document(self, doc_id):
+            if self.name == "linux_settings" and doc_id == "shell_command_policy":
+                return MockDoc(settings_store.get(doc_id))
+            return MockDoc(None, exists=False)
+
+    class MockDB:
+        def collection(self, name):
+            return MockCollection(name)
+
+    mocker.patch("app.db.get_db", return_value=MockDB())
+    mocker.patch("app.admin.get_db", return_value=MockDB())
+
+    # Mock admin auth
+    mocker.patch("app.admin._verify_google_oauth_token", return_value="jaakko.korhonen@gmail.com")
+    mocker.patch("app.admin.get_user", return_value={"role": "admin"})
+
+    # --- 1. Test Token Rotation ---
+    # Poll with old token - should trigger auto-rotation because token is 31 days old
+    headers = {"Authorization": f"Bearer {raw_token}"}
+    poll_resp = client.put(f"/linux/mdm/{device_id}", json={}, headers=headers)
+    assert poll_resp.status_code == 200
+    data = poll_resp.get_json()
+    new_token = data.get("server_meta", {}).get("new_token")
+    assert new_token is not None
+    assert device_store[device_id].get("pending_token_hash") is not None
+
+    # Poll again with old token (grace period validation) - should still succeed
+    poll_resp2 = client.put(f"/linux/mdm/{device_id}", json={}, headers=headers)
+    assert poll_resp2.status_code == 200
+
+    # Poll with new token - should promote pending token and succeed
+    new_headers = {"Authorization": f"Bearer {new_token}"}
+    poll_resp3 = client.put(f"/linux/mdm/{device_id}", json={}, headers=new_headers)
+    assert poll_resp3.status_code == 200
+    # The pending token hash should now be promoted to token_hash
+    assert device_store[device_id].get("token_hash") == linux_common.hash_token(new_token)
+    assert device_store[device_id].get("pending_token_hash") is None
+
+    # Poll again with old token - should now be unauthorized (401)
+    poll_resp4 = client.put(f"/linux/mdm/{device_id}", json={}, headers=headers)
+    assert poll_resp4.status_code == 401
+
+    # --- 2. Test ShellCommand Policy ---
+    # Mode: disabled
+    admin_headers = {"Authorization": "Bearer mock-google-token"}
+    cmd_payload = {"command": "apt-get update"}
+    resp = client.post(f"/admin/devices/{device_id}/command", json={
+        "command_type": "ShellCommand",
+        "payload": cmd_payload
+    }, headers=admin_headers)
+    assert resp.status_code == 400
+    assert "globally disabled" in resp.get_json()["error"]
+
+    # Mode: allowlist, but device shell_command_enabled is False
+    settings_store["shell_command_policy"]["mode"] = "allowlist"
+    resp = client.post(f"/admin/devices/{device_id}/command", json={
+        "command_type": "ShellCommand",
+        "payload": cmd_payload
+    }, headers=admin_headers)
+    assert resp.status_code == 400
+    assert "not enabled for this device" in resp.get_json()["error"]
+
+    # Mode: allowlist, device shell_command_enabled is True, command match
+    device_store[device_id]["shell_command_enabled"] = True
+    resp = client.post(f"/admin/devices/{device_id}/command", json={
+        "command_type": "ShellCommand",
+        "payload": cmd_payload
+    }, headers=admin_headers)
+    assert resp.status_code == 202
+
+    # Mode: allowlist, device shell_command_enabled is True, command mismatch
+    resp = client.post(f"/admin/devices/{device_id}/command", json={
+        "command_type": "ShellCommand",
+        "payload": {"command": "rm -rf /"}
+    }, headers=admin_headers)
+    assert resp.status_code == 400
+    assert "Command not in allowlist" in resp.get_json()["error"]
+
+    # Mode: any
+    settings_store["shell_command_policy"]["mode"] = "any"
+    resp = client.post(f"/admin/devices/{device_id}/command", json={
+        "command_type": "ShellCommand",
+        "payload": {"command": "rm -rf /"}
+    }, headers=admin_headers)
+    assert resp.status_code == 202
+

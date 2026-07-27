@@ -36,6 +36,7 @@ def hash_token(token: str) -> str:
 from functools import wraps
 from flask import request, jsonify, g
 import secrets
+from datetime import datetime, timezone
 from .db import get_linux_device
 
 def require_linux_device(f):
@@ -58,11 +59,41 @@ def require_linux_device(f):
         if not device:
             return jsonify({"error": "Device not enrolled"}), 404
 
-        stored_hash = device.get("token_hash")
-        # ISO 27001 Audit Evidence (Timing attack mitigation):
-        # Käytetään secrets.compare_digest ajoitushyökkäysten estämiseen token-vertailussa.
-        if not stored_hash or not secrets.compare_digest(hash_token(token), stored_hash):
+        current_hash = device.get("token_hash")
+        pending_hash = device.get("pending_token_hash")
+        pending_issued_at = device.get("pending_token_issued_at")
+
+        token_hash = hash_token(token)
+        authorized = False
+        promote_pending = False
+
+        if current_hash and secrets.compare_digest(token_hash, current_hash):
+            authorized = True
+        elif pending_hash and secrets.compare_digest(token_hash, pending_hash):
+            if pending_issued_at:
+                now = datetime.now(timezone.utc)
+                if pending_issued_at.tzinfo is None:
+                    pending_issued_at = pending_issued_at.replace(tzinfo=timezone.utc)
+                age_seconds = (now - pending_issued_at).total_seconds()
+                if age_seconds <= 24 * 3600:
+                    authorized = True
+                    promote_pending = True
+
+        if not authorized:
             return jsonify({"error": "Unauthorized"}), 401
+
+        if promote_pending:
+            from .db import upsert_linux_device
+            upsert_linux_device(resolved_device_id, {
+                "token_hash": pending_hash,
+                "token_issued_at": pending_issued_at,
+                "pending_token_hash": None,
+                "pending_token_issued_at": None
+            })
+            device["token_hash"] = pending_hash
+            device["token_issued_at"] = pending_issued_at
+            device["pending_token_hash"] = None
+            device["pending_token_issued_at"] = None
 
         g.device = device
         g.device_id = resolved_device_id

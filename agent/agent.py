@@ -204,9 +204,25 @@ def poll_loop(token: str, device_id: str) -> None:
                 backoff = 0
                 last_result = None
                 data = res.json()
+                server_meta = data.get("server_meta", {})
+
+                # Tarkistetaan tokenin rotaatio (Issue #58)
+                new_token = server_meta.get("new_token")
+                if new_token:
+                    token_path = CONFIG.token_path
+                    tmp_path = token_path.with_suffix(".tmp")
+                    try:
+                        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                        with os.fdopen(fd, 'w') as f:
+                            f.write(new_token)
+                        os.replace(tmp_path, token_path)
+                        logger.info("Token rotated successfully and saved atomically.")
+                        token = new_token
+                    except Exception as e:
+                        logger.error("Failed to save rotated token atomically: %s", e)
 
                 # Tarkistetaan agent-päivitystarve
-                latest_agent_version = data.get("server_meta", {}).get(
+                latest_agent_version = server_meta.get(
                     "latest_agent_version"
                 )
                 if latest_agent_version and latest_agent_version != AGENT_VERSION:

@@ -365,6 +365,24 @@ def send_command(udid: str) -> Response:
         if not device:
             return jsonify({"error": "Linux-laitetta ei löydy"}), 404
 
+        if command_type == "ShellCommand":
+            from .db import get_db
+            policy_doc = get_db().collection("linux_settings").document("shell_command_policy").get()
+            policy = policy_doc.to_dict() if policy_doc.exists else {}
+            mode = policy.get("mode", "disabled")
+
+            if mode == "disabled":
+                return jsonify({"error": "ShellCommand is globally disabled"}), 400
+
+            if not device.get("shell_command_enabled", False):
+                return jsonify({"error": "ShellCommand not enabled for this device"}), 400
+
+            if mode == "allowlist":
+                cmd_to_run = body.get("payload", {}).get("command", "")
+                allowlist = policy.get("allowlist", [])
+                if not any(cmd_to_run.strip().startswith(allowed) for allowed in allowlist):
+                    return jsonify({"error": f"Command not in allowlist: {cmd_to_run}"}), 400
+
         import uuid
         cmd_id = str(uuid.uuid4())
         signature, key_version = sign_command_payload(
@@ -526,3 +544,58 @@ def deny_user(email: str) -> Response:
     update_user_status(email, status="denied")
     logger.info("Käyttäjältä evätty pääsy: %s", email)
     return jsonify({"status": "denied", "email": email})
+
+
+@admin_bp.put("/linux/shell_policy")
+@require_auth
+def update_shell_policy() -> Response:
+    """Asettaa globaalin ShellCommand-policyn (mode ja allowlist)."""
+    body = request.get_json(silent=True) or {}
+    mode = body.get("mode")
+    allowlist = body.get("allowlist", [])
+
+    if mode not in ["disabled", "allowlist", "any"]:
+        return jsonify({"error": "Invalid mode. Must be: disabled, allowlist, any"}), 400
+
+    from .db import get_db
+    get_db().collection("linux_settings").document("shell_command_policy").set({
+        "mode": mode,
+        "allowlist": allowlist
+    })
+    logger.info("ShellCommand policy päivitetty: mode=%s", mode)
+    return jsonify({"status": "success", "mode": mode, "allowlist": allowlist})
+
+
+@admin_bp.put("/devices/<device_id>/shell_command_enabled")
+@require_auth
+def update_device_shell_enabled(device_id: str) -> Response:
+    """Asettaa per-laite-kohtaisen ShellCommand-sallinnan."""
+    body = request.get_json(silent=True) or {}
+    enabled = body.get("enabled", False)
+
+    device = get_linux_device(device_id)
+    if not device:
+        return jsonify({"error": "Laitetta ei löydy"}), 404
+
+    from .db import upsert_linux_device
+    upsert_linux_device(device_id, {"shell_command_enabled": enabled})
+    logger.info("Laitteen %s shell_command_enabled asetettu: %s", device_id, enabled)
+    return jsonify({"status": "success", "device_id": device_id, "shell_command_enabled": enabled})
+
+
+@admin_bp.post("/devices/<device_id>/rotate_token")
+@require_auth
+def rotate_token_admin(device_id: str) -> Response:
+    """Käynnistää manuaalisen tokenin rotaation laitteelle."""
+    platform = request.args.get("platform")
+    if platform != "linux":
+        return jsonify({"error": "Vain platform=linux on tuettu"}), 400
+
+    device = get_linux_device(device_id)
+    if not device:
+        return jsonify({"error": "Laitetta ei löydy"}), 404
+
+    from .db import upsert_linux_device
+    upsert_linux_device(device_id, {"rotation_requested": True})
+    logger.info("Manuaalinen token-rotaatio pyydetty laitteelle %s", device_id)
+    return jsonify({"status": "rotation_requested", "device_id": device_id})
