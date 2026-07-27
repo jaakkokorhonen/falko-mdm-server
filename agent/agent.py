@@ -47,18 +47,20 @@ def _read_token() -> str | None:
         return None
 
 
-def checkin(token: str, device_id: str) -> bool:
+def checkin(token: str, device_id: str, inv_data: dict | None = None) -> bool:
     """Suorittaa laitteen ensi-check-inin palvelimelle käynnistyksen yhteydessä.
 
     Args:
         token: Bearer-token, luettu _read_token()-funktiolla.
         device_id: Laitteen tunniste, laskettu inventory.collect()['device_id'].
+        inv_data: Valmiiksi kerätty inventory-tieto (jos olemassa).
 
     Returns:
         bool: True jos check-in onnistui, muuten False.
     """
     logger.info("Starting falko-agent check-in...")
-    inv_data = inventory.collect()
+    if inv_data is None:
+        inv_data = inventory.collect()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -191,13 +193,14 @@ def main() -> None:
         return
 
     # Lasketaan device_id kerran — se ei muutu ajon aikana
-    device_id = inventory.collect()["device_id"]
+    inv_data = inventory.collect()
+    device_id = inv_data.get("device_id")
     if not device_id:
         logger.critical("Cannot start: device_id could not be determined. Exiting.")
         return
 
     # Suoritetaan käynnistyksen check-in. Jos epäonnistuu, yritetään silti pollausta myöhemmin.
-    checkin(token=token, device_id=device_id)
+    checkin(token=token, device_id=device_id, inv_data=inv_data)
 
     try:
         poll_loop(token=token, device_id=device_id)
