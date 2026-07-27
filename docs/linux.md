@@ -111,10 +111,10 @@ Issues: [#38][i38] [#39][i39] [#40][i40] [#41][i41] [#42][i42] [#43][i43]
 | Item | Description |
 |---|---|
 | Command signing | **Implemented**. Admin signs command payload with GCP KMS asymmetric key; agent verifies before execution. Prevents arbitrary RCE via compromised server credentials. Includes device_id and command_id in signed data to prevent replay attacks. Uses Unicode NFC normalization for determinism. |
-| Device token rotation | Tokens auto-rotate every 30 days. Agent fetches new token on next successful poll; server invalidates old token after grace period. |
+| Device token rotation | **Implemented**. Tokens auto-rotate every 30 days. Plaintext token returned once in poll response; agent atomically writes it to disk. 24-hour grace period allows both old and new tokens. Manual rotation triggered via admin endpoint. |
 | Rate limiting on device endpoints | Cloud Armor or middleware: max 10 req/min per `device_id` on `/linux/checkin` and `/linux/mdm/*`. |
 | mTLS for agent–server channel | **Bypassed (Decided not to implement)**. Bearer token auth is retained with timing-safe secrets.compare_digest validation, combined with KMS command signing for RCE protection, removing the need for GCP CAS and Load Balancer complexity. |
-| `ShellCommand` allowlist | Optionally restrict allowed shell commands to an admin-defined allowlist in Firestore. `ShellCommand` blocked by default; must be explicitly enabled per device or device group. |
+| `ShellCommand` allowlist | **Implemented**. Checked on command creation. Configurable modes (disabled, allowlist, any) in Firestore policy and per-device gating via admin endpoints. Restricted commands return 400. |
 
 ### Reliability
 
@@ -267,7 +267,8 @@ All keys overridable via environment variables (`FALKO_SERVER_URL`, `FALKO_POLL_
 
 ### Production additions
 
-- **mTLS**: Agent presents a GCP CAS-issued client certificate. Bearer token auth is retired.
-- **Command signing**: Every command payload is signed with a GCP KMS asymmetric key. Agent rejects unsigned or invalid-signature commands.
-- **Token rotation**: Device tokens (or certificates in mTLS mode) rotate on a 30-day schedule.
+- **mTLS**: Bypassed (retained Bearer Token auth + secrets.compare_digest timing protection).
+- **Command signing**: **Implemented**. Every command payload is signed with a GCP KMS asymmetric key. Agent rejects unsigned or invalid-signature commands.
+- **Token rotation**: **Implemented**. Device tokens rotate on a 30-day schedule with a 24-hour grace period, plus manual admin triggers.
+- **ShellCommand Policy**: **Implemented**. Firestore-based mode settings (disabled, allowlist, any) and per-device gating validate all enqueued commands.
 - **Rate limiting**: Cloud Armor blocks >10 req/min per `device_id` on device endpoints.

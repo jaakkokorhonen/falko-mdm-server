@@ -82,8 +82,6 @@ The Linux plane reuses the same Firestore database, the same OIDC-protected admi
 
 ## Firestore Data Model
 
-### `linux_devices/{device_id}`
-
 | Field | Type | Description |
 |---|---|---|
 | `device_id` | string | SHA-256 of `hostname + /etc/machine-id` (64-char hex) |
@@ -98,7 +96,12 @@ The Linux plane reuses the same Firestore database, the same OIDC-protected admi
 | `last_seen` | string | ISO 8601, updated on every poll |
 | `status` | string | `enrolled` \| `unenrolled` |
 | `agent_version` | string | Semver of installed agent |
-| `token_hash` | string | SHA-256 of device bearer token (MVP) |
+| `token_hash` | string | SHA-256 of device bearer token |
+| `token_issued_at` | timestamp | Timestamp of when the active token was issued |
+| `pending_token_hash` | string | SHA-256 of new token during rotation |
+| `pending_token_issued_at` | timestamp | Timestamp of when rotation was started |
+| `rotation_requested` | bool | Flag to trigger manual rotation on next poll |
+| `shell_command_enabled` | bool | Per-device ShellCommand gating policy flag |
 | `fcm_token` | string | FCM registration token (prod) |
 
 ### `linux_devices/{device_id}/commands/{cmd_id}`
@@ -122,6 +125,12 @@ One-time enrollment tokens. Fields: `used` (bool), `expires_at` (ISO 8601).
 ### `server_config/linux_agent`
 
 Fields: `min_agent_version`, `latest_agent_version`. Written by CI/CD and `POST /admin/linux/agent_version`.
+
+### `linux_settings/shell_command_policy`
+
+Firestore policy document. Fields:
+- `mode` (string): `disabled` \| `allowlist` \| `any`
+- `allowlist` (list of strings): Allowed command prefixes (used when mode is `allowlist`)
 
 ---
 
