@@ -1,0 +1,5 @@
+[allowlist]
+  description = "Test fixtures that generate ephemeral EC keys at runtime — not stored secrets"
+  paths = [
+    '''tests/test_linux_e2e\.py''',
+  ]
