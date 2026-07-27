@@ -8,7 +8,16 @@ device_id validoidaan: ^[a-f0-9]{64}$
 ISO 27001 Audit Evidence:
   - Control A.9.4.2 (Secure log-on procedures): Bearer-token tarkistetaan SHA-256 tiivisteen
     kautta Firestoresta ennen odottavien komentojen lukemista tai kuittaamista.
-  - Control A.12.4.1 (Event logging): Komentojen pollaus, kuittaus ja epäonnistumiset lokitetaan.
+  - Control A.12.4.1 (Event logging): MDM-pollauskyselyt, tulosten vastaanotot ja virheet lokitetaan.
+
+Arkkitehtoniset päätökset (Production Simplifications):
+  - Päätetty olla toteuttamatta mTLS-varmennetunnistusta (GCP CAS + Load Balancer).
+    Korvattu SHA-256 tiivistetyllä Bearer-tokenilla ja GCP KMS -pohjaisella komentojen
+    allekirjoituksella (Issue #44). Tämä estää RCE-tason hyökkäykset tehokkaasti ilman
+    Load Balancerin ja varmennepoolin tuomaa infrastruktuurikuormaa.
+  - Päätetty olla toteuttamatta FCM/SSE-pohjaista push-herätettä. Korvattu säädettävällä
+    tiheämmällä pollauksella (esim. 300 s), mikä poistaa palvelininstanssien tarpeen ylläpitää
+    pitkiä taustayhteyksiä Cloud Runissa.
 """
 from __future__ import annotations
 import logging

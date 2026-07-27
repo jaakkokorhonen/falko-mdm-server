@@ -382,22 +382,7 @@ Production graduation requires all items below. Each maps to a `Linux-prod` GitH
 
 **Issue: [#45](https://github.com/jaakkokorhonen/falko-mdm-server/issues/45)**
 
-Replace static bearer tokens with mutual TLS using GCP Certificate Authority Service (CAS). Short-lived certificates (30-day) bound to the TLS channel cannot be replayed from a different machine, eliminating the stolen-token attack vector.
-
-**Flow:**
-1. At enrollment, agent generates a P-256 key pair and a CSR with `CN=<device_id>`.
-2. `POST /linux/enroll` accepts CSR + one-time token, calls GCP CAS `CreateCertificate`, returns signed PEM.
-3. Agent writes `/etc/falko/device.crt` and `/etc/falko/device.key` (`chmod 600 root:root`).
-4. All subsequent requests use the client certificate for mTLS.
-5. Cloud Run requires an external HTTPS Load Balancer for mTLS termination. The Load Balancer passes the `X-Client-Cert-Dn` header after a successful mTLS handshake. `middleware.require_device_cert()` replaces `verify_device_token()`.
-
-**Renewal:** Agent checks expiry at startup and daily. If expiry < 7 days: auto-renew via `POST /linux/device/cert/renew` (mTLS-authenticated).
-
-**Revocation:** `POST /admin/devices/:id/revoke` calls GCP CAS `RevokeCertificate`. Additionally, the server writes to a Firestore-based `revoked_devices/{device_id}` blacklist for immediate, real-time revocation enforcement (bypassing CRL sync latency).
-
-**Migration from MVP:** Existing bearer-token-enrolled devices re-enroll via new one-time tokens. Feature flag `FALKO_AUTH_MODE=bearer|mtls` preserves backward compatibility during migration.
-
-**GCP CAS Terraform:** `google_privateca_ca_pool` + `google_privateca_certificate_authority` (`EC_P256_SHA256`, `europe-north1`).
+**Bypassed (Decided not to implement)**: Mutual TLS (mTLS) with GCP CAS is bypassed. Instead, the Bearer Token authentication model is retained with timing-safe SHA-256 comparison (`secrets.compare_digest`). Combined with KMS command payload signing (Issue #44), this achieves the same RCE protection without introducing GCP CAS, Private CA pools, or HTTPS Load Balancer infrastructure complexity.
 
 ---
 
@@ -423,19 +408,11 @@ Sign all Linux command payloads with a GCP KMS asymmetric key (`EC_SIGN_P256_SHA
 
 ---
 
-### SSE Push Wake-Up (Server-Sent Events)
+### Adaptive Polling (Push Wake-up Bypass)
 
 **Issue: [#46](https://github.com/jaakkokorhonen/falko-mdm-server/issues/46)**
 
-Integrate Server-Sent Events (SSE) to reduce command latency from ≤900 s (poll interval) to <5 s. FCM is retired for Linux desktop push notifications due to lack of native client-side receiver SDKs in Python.
-
-**Flow:**
-1. Agent establishes and maintains a persistent keep-alive GET stream connection to `/linux/events/{device_id}`.
-2. When a command is enqueued, the server immediately pushes a wake-up event down the active SSE connection.
-3. The agent SSE listener thread receives the wake-up ping and sets a `threading.Event` to trigger a poll cycle (`poll_and_execute()`) early.
-4. The interval-based poll loop is kept as a fallback for maximum resilience.
-
-**Heartbeats:** To prevent Cloud Run from killing idle connections (max 3600s timeout), the server sends a periodic ping heartbeat (every 60s) down the SSE stream.
+**Bypassed (Decided not to implement)**: FCM/SSE push wake-up is bypassed. Instead, the agent uses a lightweight, configurable adaptive polling interval (e.g., 300 s / 5 min). This removes the need for FCM token registration, Firebase Admin SDK integration on the desktop, and persistent SSE stream keep-alive heartbeats on serverless Cloud Run.
 
 ---
 
@@ -453,11 +430,11 @@ Included even when command queue is empty. Server reads from `Firestore server_c
 
 **Agent update flow:**
 1. Compare `latest_agent_version` to own `agent.__version__`.
-2. If `latest > current` or `current < min_required`: download tarball and Sigstore/Cosign signature bundle from GCS.
-3. Verify Cosign signature (keyless signing using GitHub Actions OIDC identity) and SHA-256 checksum.
+2. If `latest > current` or `current < min_required`: download tarball and its SHA-256 checksum and KMS signature (`.sha256.sig`) from GCS.
+3. Verify the KMS signature of the SHA-256 checksum (reusing the KMS public key from `/linux/command-signing-pubkey` instead of Sigstore Cosign).
 4. Verify extracted directory integrity (presence of `agent.py` and `__version__.py`).
-5. Atomic swap: extract to `/opt/falko-agent-new/`, then copy backup (`cp -a`), and `mv` new to `/opt/falko-agent`.
-6. Restart via `systemctl restart falko-agent`.
+5. Atomic swap: copy backup (`cp -a`), and `mv` new to `/opt/falko-agent`.
+6. Restart via systemd `systemctl restart falko-agent`.
 
 **Rollback:** systemd `OnFailure=falko-agent-rollback.service` automatically runs the rollback script when the agent fails to start or crashes repeatedly, avoiding continuous loop restarts.
 
@@ -466,11 +443,12 @@ Included even when command queue is empty. Server reads from `Firestore server_c
 falko-agent-releases/
   falko-agent-{version}.tar.gz
   falko-agent-{version}.sha256
-  falko-agent-{version}.bundle   ← Sigstore Cosign signature bundle
+  falko-agent-{version}.sha256.sig   ← KMS signature of SHA-256 hash
   latest   ← plain text, current version
 ```
 
-**CI/CD:** `release-agent.yml` GitHub Actions workflow: bump version → build tarball → compute SHA-256 → sign update using Cosign → upload to GCS → update `latest` → update `Firestore server_config/linux_agent`.
+**CI/CD:** `release-agent.yml` GitHub Actions workflow: bump version → build tarball → compute SHA-256 → sign the SHA-256 using GCP KMS → upload to GCS → update `latest` → update `Firestore server_config/linux_agent`.
+
 
 
 **Admin endpoint:** `POST /admin/linux/agent_version` (OIDC) — writes `min_agent_version` + `latest_agent_version` to Firestore.

@@ -10,6 +10,12 @@ ISO 27001 Audit Evidence:
   - Control A.12.4.1 (Event logging): Kaikki tietoliikennevirheet, käynnistykset,
     check-in-tulokset ja backoff-tilat lokitetaan selkeästi journaldiin seurantaa varten.
 Ref: LINUX.md — agent.py poll loop
+
+Arkkitehtoniset päätökset (Production Simplifications):
+  - Päätetty olla käyttämättä FCM- tai SSE-pushia kuuntelussa monimutkaisuuden välttämiseksi.
+    Korvattu tiheämmällä pollauksella.
+  - Päätetty käyttää yksinkertaisempaa päivitysten varmennusta (SHA-256 ja KMS-allekirjoitus)
+    Sigstore/Cosign-työkalujen sijaan, jotta agentin riippuvuudet ja asennuskoko pysyvät pieninä.
 """
 from __future__ import annotations
 import logging
